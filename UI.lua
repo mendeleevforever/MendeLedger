@@ -1704,8 +1704,9 @@ function ML:RefreshDetail()
         lv.bar:SetMinMaxValues(0, spanDays)
         lv.bar:SetValue(e.count or 0)
         local scans = Ledger:ScanHistory(realmKey, e.key)
-        lv.barText:SetText(("Recorded on %s of %s days since %s%s%s"):format(ns.Commas(e.count), ns.Commas(spanDays),
-            ns.DayLabel(e.first), (scans and scans.n > 0) and ("  •  %s scans kept"):format(ns.Commas(scans.n)) or "",
+        lv.barText:SetText(("Recorded on %s of %s day%s since %s%s%s"):format(ns.Commas(e.count), ns.Commas(spanDays),
+            spanDays == 1 and "" or "s", ns.DayLabel(e.first),
+            (scans and scans.n > 0) and ("  •  %s scan%s kept"):format(ns.Commas(scans.n), scans.n == 1 and "" or "s") or "",
             (S and S.bad > 0) and ("  —  %d blocks unreadable here"):format(S.bad) or ""))
     else
         lv.icon:SetTexture(LEDGER_ICON)
@@ -2013,7 +2014,8 @@ function ML:RefreshOptions()
     end
     local ss = realm and realm.scanStats
     if ss and ss.scans > 0 then
-        vals[8] = ("%s scans, %s  %s(%s saved)|r"):format(ns.Commas(ss.scans), ns.Bytes(ss.bytes), GREY, ns.Bytes(math.max(0, ss.unpacked - ss.bytes)))
+        vals[8] = ("%s scan%s, %s  %s(%s saved)|r"):format(ns.Commas(ss.scans), ss.scans == 1 and "" or "s",
+            ns.Bytes(ss.bytes), GREY, ns.Bytes(math.max(0, ss.unpacked - ss.bytes)))
     else
         vals[8] = GREY .. "no scans kept yet|r"
     end
