@@ -1,0 +1,23 @@
+## Interface: 16001
+## Title: MendeLedger
+## Notes: A GUI for seeing Auctionator price history.
+## Author: MendeleevForever
+## Version: 0.1.0
+## Category: Auction/Economy
+## OptionalDeps: Auctionator
+## SavedVariables: MendeLedgerDB
+## IconTexture: 132763
+## AddonCompartmentFunc: MendeLedger_OnAddonCompartmentClick
+## AddonCompartmentFuncOnEnter: MendeLedger_OnAddonCompartmentEnter
+## AddonCompartmentFuncOnLeave: MendeLedger_OnAddonCompartmentLeave
+
+Libs\LibStub\LibStub.lua
+Libs\CallbackHandler-1.0\CallbackHandler-1.0.xml
+Libs\LibDataBroker-1.1\LibDataBroker-1.1.lua
+Libs\LibDBIcon-1.0\lib.xml
+Libs\LibCompress\lib.xml
+
+Core.lua
+Codec.lua
+Ledger.lua
+UI.lua
