@@ -2,7 +2,7 @@
 ## Title: MendeLedger
 ## Notes: A GUI for seeing Auctionator price history.
 ## Author: MendeleevForever
-## Version: 0.1.0
+## Version: 0.2.0
 ## Category: Auction/Economy
 ## OptionalDeps: Auctionator
 ## SavedVariables: MendeLedgerDB

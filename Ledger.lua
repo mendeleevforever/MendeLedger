@@ -22,6 +22,16 @@ local addonName, ns = ...
 -- Only "today" changes in Auctionator's data, so a realm remembers the last
 -- day that was final when it was recorded ("settled"); later recordings only
 -- merge newer days. Sealed blocks (Codec.lua) are therefore never rewritten.
+--
+-- Scan detail: Auctionator keeps one low/high/quantity per day, so the shape
+-- of a day is lost. Every full or summary scan passes its results through
+-- Auctionator.Database:ProcessScan(info), info[key] = { {price, available}, ... }.
+-- A post-hook on that call (hooksecurefunc: it runs after Auctionator's own
+-- code and changes nothing) gives MendeLedger each scan as it happens. Each
+-- item's scan records reuse the Codec format: the "day" field holds a scan
+-- number, low = high = lowest buyout in that scan, quantity = units on sale.
+-- realm.scans.log maps scan numbers to times; scan detail is kept for a
+-- limited number of days (keepScanDays), the daily ledger for as long as asked.
 
 local ML, Codec = ns.ML, ns.Codec
 local Num, Text = ns.Num, ns.Text
@@ -141,6 +151,8 @@ function Ledger:SourceProbe(Add)
     end
     local src, key, err = self:LiveSource()
     Add("Realm prices", src ~= nil, src and ("realm key " .. tostring(key)) or err)
+    Add("Scan detail", self.scanHook,
+        self.scanHook and "hooked into Auctionator.Database:ProcessScan" or "Auctionator's scan processing wasn't found, so only daily prices are recorded")
     Add("Day numbering", true, ("today is day %d (%s)"):format(ns.Today(), ns.DayDate(ns.Today())))
 end
 
@@ -201,7 +213,7 @@ function Ledger:ForgetRealm(key)
     if not key or not ML.db.realms[key] then return end
     ML.db.realms[key] = nil
     self.index[key] = nil
-    self.hist = nil
+    self.hist, self.scanHist = nil, nil
     if ML.db.settings.realm == key then ML.db.settings.realm = nil end
     ns.Print(("history for %s forgotten. Auctionator's own data was not touched."):format(key))
     ML:RequestUIRefresh()
@@ -397,14 +409,21 @@ end
 -------------------------------------------------------------------------------
 -- Jobs over every item of a realm: stats, pruning, repacking, indexing
 -------------------------------------------------------------------------------
-local function ItemJob(name, label, realmKey, perItem, onDone)
+-- store: "items" (daily ledger, default) or "scans" (scan detail)
+local function StoreOf(realm, store)
+    if store == "scans" then return realm.scans and realm.scans.items end
+    return realm.items
+end
+
+local function ItemJob(name, label, realmKey, perItem, onDone, store)
     local realm = Ledger:Realm(realmKey)
-    if not realm then return nil end
+    local items = realm and StoreOf(realm, store)
+    if not items then return nil end
     local keys = {}
-    for k in pairs(realm.items) do keys[#keys + 1] = k end
+    for k in pairs(items) do keys[#keys + 1] = k end
     local job = { name = name, label = label, key = realmKey, keys = keys, i = 1 }
     function job:Step(deadline)
-        local items, list, n = realm.items, self.keys, #self.keys
+        local list, n = self.keys, #self.keys
         while self.i <= n do
             local k = list[self.i]
             self.i = self.i + 1
@@ -476,16 +495,23 @@ function Ledger:Repack(quiet)
     local changed = 0
     local keys = {}
     for key in pairs(ML.db.realms) do keys[#keys + 1] = key end
+    local function Repacker(_, k, s, items)
+        local new, did = Codec.Repack(s, compress)
+        if did then items[k] = new; changed = changed + 1 end
+    end
     for i, key in ipairs(keys) do
-        ItemJob("repack", "repacking " .. self:RealmName(key), key, function(_, k, s, items)
-            local new, did = Codec.Repack(s, compress)
-            if did then items[k] = new; changed = changed + 1 end
-        end, function()
-            Ledger:RefreshStats(key)
-            if i == #keys and not quiet then
-                ns.Print(("repacked %s items (%s)."):format(ns.Commas(changed), compress and "compressed where it saves 10% or more" or "uncompressed"))
+        ItemJob("repack", "repacking " .. self:RealmName(key), key, Repacker, function() Ledger:RefreshStats(key) end)
+        local last = i == #keys
+        local job = ItemJob("repack", "repacking scan detail", key, Repacker, function()
+            Ledger.scanHist = nil
+            Ledger:RefreshScanStats(key)
+            if last and not quiet then
+                ns.Print(("repacked %s item histories (%s)."):format(ns.Commas(changed), compress and "compressed where it saves 10% or more" or "uncompressed"))
             end
-        end)
+        end, "scans")
+        if not job and last and not quiet then
+            ns.Print(("repacked %s item histories."):format(ns.Commas(changed)))
+        end
     end
     if #keys == 0 and not quiet then ns.Print("the ledger is empty.") end
 end
@@ -501,6 +527,11 @@ function Ledger:PrintStats()
         ns.Bytes(st.bytes), st.records > 0 and st.bytes / st.records or 0, ns.Bytes(st.records * 50)))
     print(("  sealed blocks: %d compressed, %d stored as is; compression saved %s"):format(
         st.compressed, st.rawSealed, ns.Bytes(st.unpacked - st.bytes)))
+    local ss = realm.scanStats
+    if ss and ss.scans > 0 then
+        print(("  scan detail: %s scans (%s full) from %s to %s, %s records in %s"):format(ns.Commas(ss.scans), ns.Commas(ss.full),
+            ns.WhenLabel(ss.first), ns.WhenLabel(ss.last), ns.Commas(ss.records), ns.Bytes(ss.bytes)))
+    end
 end
 
 -------------------------------------------------------------------------------
@@ -749,14 +780,221 @@ function Ledger:History(realmKey, key)
 end
 
 -------------------------------------------------------------------------------
+-- Scan detail
+-------------------------------------------------------------------------------
+function Ledger:Scans(realmKey, create)
+    local realm = realmKey and self:Realm(realmKey, create)
+    if not realm then return nil end
+    local sc = realm.scans
+    if not sc and create then
+        sc = { seq = 0, log = {}, count = {}, full = {}, items = {}, lastFull = 0 }
+        realm.scans = sc
+    end
+    return sc
+end
+
+local hookedDB, lastInfo
+function Ledger:HookScans()
+    local Au = A()
+    local db = type(Au) == "table" and Au.Database
+    if type(db) ~= "table" or type(db.ProcessScan) ~= "function" then
+        self.scanHook = false
+        return false
+    end
+    if hookedDB ~= db then        -- Auctionator rebuilds its Database after some of its own commands
+        hooksecurefunc(db, "ProcessScan", function(_, info) Ledger:OnScan(info) end)   -- RETEST: Auctionator internal
+        hookedDB = db
+    end
+    self.scanHook = true
+    return true
+end
+
+Ledger.scanQueue = {}
+
+function Ledger:OnScan(info)
+    if type(info) ~= "table" or info == lastInfo then return end
+    lastInfo = info
+    if not ML.db or not ML.db.settings.recordScans then return end
+    local key = self:CurrentRealmKey()
+    if not key then return end
+    self.scanQueue[#self.scanQueue + 1] = { info = info, t = time(), key = key }
+    if not self.scanJob then self:NextScan() end
+    self:ScheduleRecord(20, "scan", true)     -- keeps the daily ledger current while the AH stays open
+end
+
+-- A scan counts as full when it lists most of what the last full scan did;
+-- only full scans say anything about items that were NOT on sale.
+local FULL_MIN, FULL_SHARE = 500, 0.5
+
+function Ledger:NextScan()
+    local req = table.remove(self.scanQueue, 1)
+    if not req then return end
+    local sc = self:Scans(req.key, true)
+    local info = req.info
+    local keys = {}
+    for k, v in pairs(info) do
+        if type(k) == "string" and type(v) == "table" then keys[#keys + 1] = k end
+    end
+    local id = sc.seq + 1
+    sc.seq = id
+    sc.log[id], sc.count[id] = req.t, #keys
+    if #keys >= math.max(FULL_MIN, floor((sc.lastFull or 0) * FULL_SHARE)) then
+        sc.full[id], sc.lastFull = true, #keys
+    end
+    local items = sc.items
+    local job = { name = "scan", label = "saving scan detail", key = req.key, keys = keys, i = 1, saved = 0, id = id }
+    function job:Step(deadline)
+        local compress = ML.db.settings.compress
+        local list, n = self.keys, #self.keys
+        while self.i <= n do
+            local k = list[self.i]
+            self.i = self.i + 1
+            local entries, low, total = info[k], nil, 0
+            for j = 1, #entries do
+                local e = entries[j]
+                local p = type(e) == "table" and Num(e.price)
+                if p and p > 0 then
+                    if not low or p < low then low = p end
+                    local a = Num(e.available)
+                    if a and a > 0 then total = total + a end
+                end
+            end
+            if low then
+                local P = Codec.NewList()
+                Codec.Push(P, id, floor(low), floor(low), floor(total))
+                local new = Codec.Merge(items[k], P, floor(low), compress, nil)
+                if new then items[k] = new; self.saved = self.saved + 1 end
+            end
+            if self.i % 16 == 0 and ns.Clock() >= deadline then return false end
+        end
+        return true
+    end
+    function job:Progress() return self.i - 1, #self.keys end
+    function job:OnDone() Ledger:ScanDone(self) end
+    self.scanJob = job
+    ns.StartJob(job)
+end
+
+function Ledger:ScanDone(job)
+    self.scanJob = nil
+    local sc = self:Scans(job.key)
+    if sc and not job.failed then
+        sc.lastScan = sc.log[job.id]
+        self.scanStatus = ("Last scan: %s item%s %s (%s)."):format(ns.Commas(job.saved), job.saved == 1 and "" or "s",
+            sc.full[job.id] and "in a full scan" or "in a partial scan", ns.TimeLabel(sc.lastScan))
+    end
+    if self.scanHist and self.scanHist.realm == job.key then self.scanHist = nil end
+    self:PruneScans(job.key)
+    self:RefreshScanStats(job.key)
+    self:NextScan()
+    ML:RequestUIRefresh(0.5)
+end
+
+-- Scan detail older than keepScanDays goes, a sealed block (128 scans of an item) at a time
+function Ledger:PruneScans(realmKey, force)
+    local sc = self:Scans(realmKey)
+    if not sc then return end
+    local today, keep = ns.Today(), ML.db.settings.keepScanDays
+    if not force and sc.prunedOn == today and sc.prunedKeep == keep then return end
+    sc.prunedOn, sc.prunedKeep = today, keep
+    local cutoffT, cutoffId = time() - keep * 86400, nil
+    for id, t in pairs(sc.log) do
+        if t < cutoffT then
+            sc.log[id], sc.count[id], sc.full[id] = nil, nil, nil
+        elseif not cutoffId or id < cutoffId then
+            cutoffId = id
+        end
+    end
+    cutoffId = cutoffId or (sc.seq + 1)
+    ItemJob("pruneScans", "removing old scan detail", realmKey, function(_, k, s, items)
+        local new, n = Codec.Prune(s, cutoffId)
+        if n > 0 then items[k] = new end
+    end, function()
+        Ledger.scanHist = nil
+        Ledger:RefreshScanStats(realmKey)
+    end, "scans")
+end
+
+function Ledger:RefreshScanStats(realmKey)
+    local realm, sc = self:Realm(realmKey), self:Scans(realmKey)
+    if not realm or not sc then return end
+    local st = { items = 0, records = 0, bytes = 0, unpacked = 0, compressed = 0, scans = 0, full = 0 }
+    for id, t in pairs(sc.log) do
+        st.scans = st.scans + 1
+        if sc.full[id] then st.full = st.full + 1 end
+        if not st.first or t < st.first then st.first = t end
+        if not st.last or t > st.last then st.last = t end
+    end
+    ItemJob("scanStats", "measuring scan detail", realmKey, function(_, _, s)
+        local m, _, count, _, _, _, comp, _, unpacked = Codec.Summary(s)
+        if not m then return end
+        st.items = st.items + 1
+        st.records = st.records + count
+        st.bytes = st.bytes + #s
+        st.unpacked = st.unpacked + unpacked
+        st.compressed = st.compressed + comp
+    end, function()
+        realm.scanStats = st
+        ML:RequestUIRefresh()
+    end, "scans")
+end
+
+-- One item's scan records with times: { n, t = {}, lo = {}, q = {}, id = {}, bad }
+function Ledger:ScanHistory(realmKey, key)
+    local sc = self:Scans(realmKey)
+    local s = sc and sc.items[key]
+    if not s then return nil end
+    local h = self.scanHist
+    if h and h.realm == realmKey and h.key == key and h.s == s then return h.series end
+    local L, bad = Codec.Decode(s)
+    local series = { n = 0, t = {}, lo = {}, q = {}, id = {}, bad = bad }
+    for i = 1, L.n do
+        local t = sc.log[L.d[i]]
+        if t then                          -- records older than the kept scan log have no time
+            local n = series.n + 1
+            series.n = n
+            series.t[n], series.lo[n], series.q[n], series.id[n] = t, L.l[i], L.q[i], L.d[i]
+        end
+    end
+    self.scanHist = { realm = realmKey, key = key, s = s, series = series }
+    return series
+end
+
+-- Times of full scans in [fromT, toT] that did not list the item (sorted),
+-- plus how many full scans there were in that window
+function Ledger:MissedScans(realmKey, series, fromT, toT)
+    local sc = self:Scans(realmKey)
+    local out, fulls = {}, 0
+    if not sc then return out, 0 end
+    local seen = {}
+    for i = 1, series.n do seen[series.id[i]] = true end
+    for id in pairs(sc.full) do
+        local t = sc.log[id]
+        if t and t >= fromT and t <= toT then
+            fulls = fulls + 1
+            if not seen[id] then out[#out + 1] = t end
+        end
+    end
+    table.sort(out)
+    return out, fulls
+end
+
+-------------------------------------------------------------------------------
 -- Events
 -------------------------------------------------------------------------------
 function Ledger:OnLogin()
     for key, realm in pairs(ML.db.realms) do
         if not realm.stats then self:RefreshStats(key) end
+        if realm.scans and not realm.scanStats then self:RefreshScanStats(key) end
     end
+    self:HookScans()
     self:ScheduleRecord(10, "login", true)
 end
+
+-- Auctionator can rebuild its Database; make sure the scan hook is on the current one
+ns.On("AUCTION_HOUSE_SHOW", function()
+    Ledger:HookScans()
+end)
 
 ns.On("AUCTION_HOUSE_CLOSED", function()
     Ledger:ScheduleRecord(4, "auction house closed", true)

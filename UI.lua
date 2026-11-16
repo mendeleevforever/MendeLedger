@@ -31,7 +31,7 @@ local PL, PR, PT, PB = 58, 10, 10, 22     -- plot insets inside the graph
 local PW, PH        = GW - PL - PR, GH - PT - PB
 local MAX_COLS      = 120                 -- more days than this are grouped into spans
 local DAY_ROW_H     = 20
-local RANGE_W       = 5 * 38 + 4 * 3
+local RANGE_W       = 7 * 38 + 6 * 3
 local LEDGER_ICON   = 132763
 local OPTIONS_ICON  = "Interface\\Icons\\INV_Misc_Gear_01"
 local QUESTION      = "Interface\\Icons\\INV_Misc_QuestionMark"
@@ -641,7 +641,7 @@ end
 -------------------------------------------------------------------------------
 -- Ledger view: header, item list, detail panel with the graph
 -------------------------------------------------------------------------------
-local RANGES = { { 7, "7D" }, { 30, "30D" }, { 90, "90D" }, { 365, "1Y" }, { 0, "All" } }
+local RANGES = { { 1, "24H" }, { 3, "3D" }, { 7, "7D" }, { 30, "30D" }, { 90, "90D" }, { 365, "1Y" }, { 0, "All" } }
 
 function ML:CreateLedgerView(f)
     local lv = CreateFrame("Frame", nil, f)
@@ -700,8 +700,9 @@ function ML:CreateLedgerView(f)
             ML:UpdateRangeButtons()
             ML:RefreshDetail()
         end)
-        AddHoverTip(b, r[1] > 0 and ("Last %d days"):format(r[1]) or "All recorded history",
-            "Range shown in the graph, the summary and the daily records.")
+        AddHoverTip(b, (r[1] == 1 and "Last 24 hours") or (r[1] > 0 and ("Last %d days"):format(r[1])) or "All recorded history",
+            r[1] > 0 and r[1] <= 7 and "Range shown in the graph, the summary and the records. Up to 7 days, every Auctionator scan can be shown instead of one point per day."
+            or "Range shown in the graph, the summary and the daily records.")
         lv.rangeButtons[i] = b
     end
 
@@ -1124,7 +1125,14 @@ function ML:ToggleFilterMenu(anchor)
 end
 
 -------------------------------------------------------------------------------
--- Graph: daily low line, low-high band, quantity bars, one hover strip per column
+-- Graph: lowest-buyout line, low-high band, quantity bars, one hover strip
+-- per column. Two kinds of series share it:
+--   day   one record per day from the daily ledger (positions in days)
+--   scan  one record per Auctionator scan (positions in seconds), used for
+--         ranges up to 7 days when the item has scan detail there
+-- Columns: more records than MAX_COLS are grouped, a column then shows the
+-- lowest and highest of its records. In scan view, a full scan that did not
+-- list the item (sold out) breaks the line.
 -------------------------------------------------------------------------------
 local function Pooled(pool, i, make)
     local obj = pool[i]
@@ -1154,6 +1162,62 @@ local function NiceScale(lo, hi, ticks)
     lo, hi = math.max(0, lo - pad), hi + pad
     local step = NiceStep((hi - lo) / ticks)
     return math.floor(lo / step) * step, math.ceil(hi / step) * step, step
+end
+
+local function DateOf(t)                  -- "Nov 16"
+    return ("%s %d"):format(date("%b", t), tonumber(date("%d", t)))
+end
+
+local function DateTimeOf(t)              -- "Nov 16 2:30 PM"
+    return DateOf(t) .. " " .. ns.TimeLabel(t)
+end
+
+local RANGE_NAMES = { [1] = "Last 24 hours", [3] = "Last 3 days" }
+
+-- The series the graph, summary and records show for an item and the chosen range
+function ML:BuildSeries(realmKey, e)
+    local s = self.db.settings
+    local range = s.range
+    local L, bad = Ledger:History(realmKey, e.key)
+    local S = { n = 0, t = {}, lo = {}, hi = {}, q = {}, bad = bad or 0 }
+    local function Add(t, lo, hi, q)
+        local n = S.n + 1
+        S.n = n
+        S.t[n], S.lo[n], S.hi[n], S.q[n] = t, lo, hi, q
+    end
+
+    if range > 0 and range <= 7 then
+        S.short = true
+        local sc = Ledger:ScanHistory(realmKey, e.key)
+        local toT = time()
+        local fromT = toT - range * 86400
+        local inRange = 0
+        if sc then
+            for i = sc.n, 1, -1 do
+                if sc.t[i] < fromT then break end
+                inRange = inRange + 1
+            end
+        end
+        S.scansInRange = inRange
+        if s.useScans and inRange >= 1 and (inRange >= 2 or range == 1) then
+            S.mode, S.from, S.to, S.bad = "scan", fromT, toT, sc.bad
+            for i = 1, sc.n do
+                if sc.t[i] >= fromT then Add(sc.t[i], sc.lo[i], sc.lo[i], sc.q[i]) end
+            end
+            S.breaks, S.fulls = Ledger:MissedScans(realmKey, sc, fromT, toT)
+            return S
+        end
+    end
+
+    S.mode = "day"
+    if not L or L.n == 0 then return S end
+    local toD = math.max(ns.Today(), L.d[L.n])
+    S.from, S.to = (range > 0) and (toD - range + 1) or L.d[1], toD
+    for i = 1, L.n do
+        if L.d[i] >= S.from and L.d[i] <= S.to then Add(L.d[i], L.l[i], L.h[i], L.q[i]) end
+    end
+    S.lastDay = L.d[L.n]
+    return S
 end
 
 function ML:CreateGraph(d)
@@ -1196,10 +1260,10 @@ function ML:CreateGraph(d)
     g.empty:SetJustifyH("CENTER")
     if g.empty.SetSpacing then g.empty:SetSpacing(3) end
 
-    -- legend under the graph
+    -- legend under the graph, with the scans / days switch on the right
     local lg = CreateFrame("Frame", nil, d)
-    lg:SetSize(GW, 14)
-    lg:SetPoint("TOPLEFT", 12, -12 - GH - 4)
+    lg:SetSize(GW, 16)
+    lg:SetPoint("TOPLEFT", 12, -12 - GH - 3)
     local x = PL
     local function Swatch(kind, rgb, alpha, text)
         local t = lg:CreateTexture(nil, "ARTWORK")
@@ -1208,20 +1272,55 @@ function ML:CreateGraph(d)
         t:SetPoint("LEFT", x, 0)
         local fs = AddLabel(lg, text, "GameFontNormalSmall", C.muted)
         fs:SetPoint("LEFT", t, "RIGHT", 5, 0)
-        x = x + (kind == "line" and 14 or 10) + 5 + fs:GetStringWidth() + 18
+        x = x + (kind == "line" and 14 or 10) + 5 + fs:GetStringWidth() + 14
     end
-    Swatch("line", C.header, 1, "Daily low")
-    Swatch("box", C.goldLight, 0.45, "Low–high range")
-    Swatch("box", C.stripe, 0.9, "Quantity (most seen)")
+    Swatch("line", C.header, 1, "Lowest buyout")
+    Swatch("box", C.goldLight, 0.45, "Low–high")
+    Swatch("box", C.stripe, 0.9, "Quantity")
+
+    local view = FlatButton(lg, "", 112, 16)
+    view:SetPoint("RIGHT", 0, 0)
+    view:SetScript("OnClick", function()
+        ML.db.settings.useScans = not ML.db.settings.useScans
+        ML:RefreshDetail()
+    end)
+    view:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:AddLine("Scan view or daily view", 1, 0.82, 0)
+        GameTooltip:AddLine("For ranges up to 7 days the graph can show every Auctionator scan instead of one point per day. Scan detail is kept for "
+            .. ML.db.settings.keepScanDays .. " days (Options tab).", 1, 1, 1, true)
+        if self.note then GameTooltip:AddLine(self.note, C.muted[1], C.muted[2], C.muted[3], true) end
+        GameTooltip:Show()
+    end)
+    view:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    g.viewButton = view
 end
 
-function ML:DrawGraph(L, e)
+function ML:UpdateViewButton(S)
+    local b = self.frame.ledgerView.detail.graph.viewButton
+    if not S or not S.short then b:Hide() return end
+    b:Show()
+    local scans = S.scansInRange or 0
+    if S.mode == "scan" then
+        b.label:SetText("View: each scan")
+        b.note = nil
+    elseif scans > 0 then
+        b.label:SetText("View: daily")
+        b.note = ("%d scan%s of this item in this range; click to see %s."):format(scans, scans == 1 and "" or "s", scans == 1 and "it" or "them")
+    else
+        b.label:SetText(GREY .. "View: daily|r")
+        b.note = "No scans of this item in this range yet. Scan detail comes from Auctionator scans made while MendeLedger is running."
+    end
+    SetFlatSelected(b, S.mode == "scan")
+end
+
+function ML:DrawGraph(S, e)
     local g = self.frame.ledgerView.detail.graph
     local plot = g.plot
     local s = self.db.settings
     g.guide:Hide()
     g.marker:Hide()
-    g.cols = nil
+    g.cols, g.mode = nil, S and S.mode or nil
     local used = { grid = 1, ylabels = 1, xlabels = 1, bands = 1, qbars = 1, lines = 1, dots = 1, hits = 1 }
     local function Finish(emptyText)
         for name, i in pairs(used) do HideFrom(g[name], i) end
@@ -1230,34 +1329,34 @@ function ML:DrawGraph(L, e)
     end
 
     if not e then return Finish("Pick an item on the left to see its price history.") end
-    if not L or L.n == 0 then return Finish("No readable records for this item.") end
+    if not S or S.n == 0 then
+        if S and S.mode == "day" and S.lastDay then
+            return Finish(("No scans of this item in the %s.\nIt was last seen on %s."):format(
+                RANGE_NAMES[s.range] and RANGE_NAMES[s.range]:lower() or ("last %d days"):format(s.range), ns.DayDate(S.lastDay)))
+        end
+        return Finish("No readable records for this item.")
+    end
 
-    local today = ns.Today()
-    local endDay = math.max(today, L.d[L.n])
-    local startDay = (s.range > 0) and (endDay - s.range + 1) or L.d[1]
-    local span = endDay - startDay + 1
+    local isScan = S.mode == "scan"
+    local off = isScan and 0 or 0.5
+    local span = isScan and math.max(1, S.to - S.from) or (S.to - S.from + 1)
     local bucket = math.max(1, math.ceil(span / MAX_COLS))
 
     local cols, byB = {}, {}
-    for i = 1, L.n do
-        local day = L.d[i]
-        if day >= startDay and day <= endDay then
-            local b = math.floor((day - startDay) / bucket)
-            local col = byB[b]
-            if not col then
-                col = { b = b, lo = L.l[i], hi = L.h[i], q = L.q[i], n = 0, d1 = day, d2 = day }
-                byB[b] = col
-                cols[#cols + 1] = col
-            end
-            col.n = col.n + 1
-            if L.l[i] < col.lo then col.lo = L.l[i] end
-            if L.h[i] > col.hi then col.hi = L.h[i] end
-            if L.q[i] > col.q then col.q = L.q[i] end
-            if day > col.d2 then col.d2 = day end
+    for i = 1, S.n do
+        local t = S.t[i]
+        local b = math.floor((t - S.from) / bucket)
+        local col = byB[b]
+        if not col then
+            col = { b = b, lo = S.lo[i], hi = S.hi[i], q = S.q[i], n = 0, t1 = t, t2 = t }
+            byB[b] = col
+            cols[#cols + 1] = col
         end
-    end
-    if #cols == 0 then
-        return Finish(("No scans of this item in the last %d days.\nIt was last seen on %s."):format(s.range, ns.DayDate(L.d[L.n])))
+        col.n = col.n + 1
+        if S.lo[i] < col.lo then col.lo = S.lo[i] end
+        if S.hi[i] > col.hi then col.hi = S.hi[i] end
+        if S.q[i] > col.q then col.q = S.q[i] end
+        if t > col.t2 then col.t2 = t end
     end
 
     -- scales
@@ -1270,12 +1369,12 @@ function ML:DrawGraph(L, e)
     end
     local yMin, yMax, step = NiceScale(minV, maxV, 4)
     local function Y(v) return (v - yMin) / (yMax - yMin) * PH end
-    local cw = PW * bucket / span
-    local function X(col)
-        local x = PW * ((col.b + 0.5) * bucket) / span
-        return math.min(PW - 1, x)
+    for _, col in ipairs(cols) do
+        col.x = math.max(0, math.min(PW - 1, PW * ((col.t1 + col.t2) / 2 - S.from + off) / span))
+        col.y = Y(col.lo)
     end
-    local barW = math.max(2, math.min(14, cw * 0.6))
+    local slots = isScan and #cols or (span / bucket)
+    local barW = math.max(2, math.min(14, 0.6 * PW / math.max(1, slots)))
 
     -- grid and price labels
     local v = yMin
@@ -1304,23 +1403,33 @@ function ML:DrawGraph(L, e)
         v = v + step
     end
 
-    -- date labels
-    local ticks = math.min(5, span)
-    local lastDay
-    for t = 0, ticks - 1 do
-        local day = startDay + math.floor(t * (span - 1) / math.max(1, ticks - 1) + 0.5)
-        if day ~= lastDay then
-            lastDay = day
-            local fs = Pooled(g.xlabels, used.xlabels, function()
-                local f = AddLabel(g, "", "GameFontNormalSmall", C.muted)
-                f:SetJustifyH("CENTER")
-                return f
-            end)
-            used.xlabels = used.xlabels + 1
-            local x = PW * ((day - startDay) + 0.5) / span
-            fs:ClearAllPoints()
-            fs:SetPoint("TOP", plot, "BOTTOMLEFT", x, -5)
-            fs:SetText(ns.DayLabel(day))
+    -- time labels
+    local function XLabel(text, x)
+        local fs = Pooled(g.xlabels, used.xlabels, function()
+            local f = AddLabel(g, "", "GameFontNormalSmall", C.muted)
+            f:SetJustifyH("CENTER")
+            return f
+        end)
+        used.xlabels = used.xlabels + 1
+        fs:ClearAllPoints()
+        fs:SetPoint("TOP", plot, "BOTTOMLEFT", x, -5)
+        fs:SetText(text)
+    end
+    if isScan then
+        local short = span <= 36 * 3600
+        for k = 0, 4 do
+            local t = S.from + span * (0.06 + 0.88 * k / 4)
+            XLabel(short and ns.TimeLabel(t) or ns.WhenLabel(t), PW * (t - S.from) / span)
+        end
+    else
+        local ticks = math.min(5, span)
+        local lastDay
+        for k = 0, ticks - 1 do
+            local day = S.from + math.floor(k * (span - 1) / math.max(1, ticks - 1) + 0.5)
+            if day ~= lastDay then
+                lastDay = day
+                XLabel(ns.DayLabel(day), PW * ((day - S.from) + 0.5) / span)
+            end
         end
     end
 
@@ -1337,42 +1446,47 @@ function ML:DrawGraph(L, e)
                 used.qbars = used.qbars + 1
                 bar:ClearAllPoints()
                 bar:SetSize(barW, math.max(1, col.q / maxQ * qh))
-                bar:SetPoint("BOTTOM", plot, "BOTTOMLEFT", X(col), 1)
+                bar:SetPoint("BOTTOM", plot, "BOTTOMLEFT", col.x, 1)
             end
         end
     end
 
-    -- low-high band
+    -- low-high band (a day's range, or the range across a column's scans)
     if s.showBand then
         for _, col in ipairs(cols) do
-            local band = Pooled(g.bands, used.bands, function()
-                local t = plot:CreateTexture(nil, "ARTWORK", nil, 0)
-                t:SetColorTexture(C.goldLight[1], C.goldLight[2], C.goldLight[3], 0.32)
-                return t
-            end)
-            used.bands = used.bands + 1
-            local y1, y2 = Y(col.lo), Y(col.hi)
-            band:ClearAllPoints()
-            band:SetSize(barW, math.max(2, y2 - y1))
-            band:SetPoint("BOTTOM", plot, "BOTTOMLEFT", X(col), y1)
+            if col.hi > col.lo or not isScan then
+                local band = Pooled(g.bands, used.bands, function()
+                    local t = plot:CreateTexture(nil, "ARTWORK", nil, 0)
+                    t:SetColorTexture(C.goldLight[1], C.goldLight[2], C.goldLight[3], 0.32)
+                    return t
+                end)
+                used.bands = used.bands + 1
+                local y1, y2 = Y(col.lo), Y(col.hi)
+                band:ClearAllPoints()
+                band:SetSize(barW, math.max(2, y2 - y1))
+                band:SetPoint("BOTTOM", plot, "BOTTOMLEFT", col.x, y1)
+            end
         end
     end
 
-    -- daily low line and points
+    -- lowest-buyout line and points; in scan view a missed full scan breaks it
+    local breaks, bi = S.breaks or {}, 1
     for i, col in ipairs(cols) do
-        local x, y = X(col), Y(col.lo)
-        col.x, col.y = x, y
         if i > 1 and g.canLine then
             local prev = cols[i - 1]
-            local line = Pooled(g.lines, used.lines, function()
-                local l = plot:CreateLine(nil, "ARTWORK", nil, 3)
-                l:SetThickness(2)
-                l:SetColorTexture(C.header[1], C.header[2], C.header[3], 1)
-                return l
-            end)
-            used.lines = used.lines + 1
-            line:SetStartPoint("BOTTOMLEFT", plot, prev.x, prev.y)
-            line:SetEndPoint("BOTTOMLEFT", plot, x, y)
+            while breaks[bi] and breaks[bi] <= prev.t2 do bi = bi + 1 end
+            local broken = breaks[bi] ~= nil and breaks[bi] < col.t1
+            if not broken then
+                local line = Pooled(g.lines, used.lines, function()
+                    local l = plot:CreateLine(nil, "ARTWORK", nil, 3)
+                    l:SetThickness(2)
+                    l:SetColorTexture(C.header[1], C.header[2], C.header[3], 1)
+                    return l
+                end)
+                used.lines = used.lines + 1
+                line:SetStartPoint("BOTTOMLEFT", plot, prev.x, prev.y)
+                line:SetEndPoint("BOTTOMLEFT", plot, col.x, col.y)
+            end
         end
         if #cols <= 60 or not g.canLine then
             local dot = Pooled(g.dots, used.dots, function()
@@ -1383,13 +1497,15 @@ function ML:DrawGraph(L, e)
             end)
             used.dots = used.dots + 1
             dot:ClearAllPoints()
-            dot:SetPoint("CENTER", plot, "BOTTOMLEFT", x, y)
+            dot:SetPoint("CENTER", plot, "BOTTOMLEFT", col.x, col.y)
         end
     end
 
-    -- hover strips: one invisible button per column, no polling
-    g.cols, g.bucket = cols, bucket
-    for _, col in ipairs(cols) do
+    -- hover strips: each column owns the space halfway to its neighbours (no polling)
+    g.cols, g.bucket, g.mode = cols, bucket, S.mode
+    for i, col in ipairs(cols) do
+        local left = (i > 1) and (cols[i - 1].x + col.x) / 2 or 0
+        local right = (i < #cols) and (col.x + cols[i + 1].x) / 2 or PW
         local hit = Pooled(g.hits, used.hits, function()
             local b = CreateFrame("Button", nil, plot)
             b:SetScript("OnEnter", function(self) ML:GraphHover(self) end)
@@ -1401,8 +1517,8 @@ function ML:DrawGraph(L, e)
         used.hits = used.hits + 1
         hit.col = col
         hit:ClearAllPoints()
-        hit:SetSize(math.max(3, cw), PH)
-        hit:SetPoint("BOTTOM", plot, "BOTTOMLEFT", X(col), 0)
+        hit:SetSize(math.max(2, right - left), PH)
+        hit:SetPoint("BOTTOMLEFT", plot, "BOTTOMLEFT", left, 0)
     end
     Finish(nil)
 end
@@ -1419,59 +1535,81 @@ function ML:GraphHover(hit)
     g.marker:SetPoint("CENTER", g.plot, "BOTTOMLEFT", col.x, col.y)
     g.marker:Show()
 
-    GameTooltip:SetOwner(hit, "ANCHOR_RIGHT")
-    if col.d1 == col.d2 then
-        local t = ns.DayTime(col.d1)
-        GameTooltip:AddLine(("%s, %s"):format(date("%A", t), ns.DayDate(col.d1)), 1, 0.82, 0)
-    else
-        GameTooltip:AddLine(("%s – %s"):format(ns.DayLabel(col.d1), ns.DayDate(col.d2)), 1, 0.82, 0)
-    end
     local m = C.muted
-    GameTooltip:AddDoubleLine("Low", ns.Coins(col.lo), m[1], m[2], m[3], 1, 1, 1)
-    GameTooltip:AddDoubleLine("High", ns.Coins(col.hi), m[1], m[2], m[3], 1, 1, 1)
-    GameTooltip:AddDoubleLine("Quantity (most seen)", col.q > 0 and ns.Commas(col.q) or "unknown", m[1], m[2], m[3], 1, 1, 1)
-    if g.bucket > 1 then
-        GameTooltip:AddLine(("%d recorded day%s in this %d-day span"):format(col.n, col.n == 1 and "" or "s", g.bucket), m[1], m[2], m[3])
+    GameTooltip:SetOwner(hit, "ANCHOR_RIGHT")
+    if g.mode == "scan" then
+        if col.n == 1 then
+            GameTooltip:AddLine(("%s, %s"):format(date("%A", col.t1), DateTimeOf(col.t1)), 1, 0.82, 0)
+            GameTooltip:AddDoubleLine("Lowest buyout", ns.Coins(col.lo), m[1], m[2], m[3], 1, 1, 1)
+            GameTooltip:AddDoubleLine("On sale", col.q > 0 and ns.Commas(col.q) or "unknown", m[1], m[2], m[3], 1, 1, 1)
+        else
+            local sameDay = date("%Y%m%d", col.t1) == date("%Y%m%d", col.t2)
+            GameTooltip:AddLine(("%s – %s"):format(DateTimeOf(col.t1), sameDay and ns.TimeLabel(col.t2) or DateTimeOf(col.t2)), 1, 0.82, 0)
+            GameTooltip:AddDoubleLine("Lowest buyout", ns.Coins(col.lo), m[1], m[2], m[3], 1, 1, 1)
+            GameTooltip:AddDoubleLine("Highest of the scans", ns.Coins(col.hi), m[1], m[2], m[3], 1, 1, 1)
+            GameTooltip:AddDoubleLine("Most on sale", col.q > 0 and ns.Commas(col.q) or "unknown", m[1], m[2], m[3], 1, 1, 1)
+            GameTooltip:AddLine(("%d scans in this column"):format(col.n), m[1], m[2], m[3])
+        end
+    else
+        if col.t1 == col.t2 then
+            local t = ns.DayTime(col.t1)
+            GameTooltip:AddLine(("%s, %s"):format(date("%A", t), ns.DayDate(col.t1)), 1, 0.82, 0)
+        else
+            GameTooltip:AddLine(("%s – %s"):format(ns.DayLabel(col.t1), ns.DayDate(col.t2)), 1, 0.82, 0)
+        end
+        GameTooltip:AddDoubleLine("Low", ns.Coins(col.lo), m[1], m[2], m[3], 1, 1, 1)
+        GameTooltip:AddDoubleLine("High", ns.Coins(col.hi), m[1], m[2], m[3], 1, 1, 1)
+        GameTooltip:AddDoubleLine("Quantity (most seen)", col.q > 0 and ns.Commas(col.q) or "unknown", m[1], m[2], m[3], 1, 1, 1)
+        if g.bucket > 1 then
+            GameTooltip:AddLine(("%d recorded day%s in this %d-day span"):format(col.n, col.n == 1 and "" or "s", g.bucket), m[1], m[2], m[3])
+        end
     end
     GameTooltip:Show()
 end
 
 -------------------------------------------------------------------------------
--- Summary and daily records
+-- Summary and records (daily records, or every scan in scan view)
 -------------------------------------------------------------------------------
-local SUMMARY = {
-    { "price",  "Latest price" }, { "change", "Change" },
-    { "low",    "Lowest" },       { "high",   "Highest" },
-    { "avg",    "Average low" },  { "qty",    "Average quantity" },
-    { "days",   "Days recorded" }, { "latest", "Latest record" },
+local SUMMARY = { "price", "change", "low", "high", "avg", "qty", "count", "latest" }
+local SUMMARY_LABELS = {
+    day  = { price = "Latest price", change = "Change", low = "Lowest", high = "Highest",
+             avg = "Average low", qty = "Average quantity", count = "Days recorded", latest = "Latest record" },
+    scan = { price = "Latest scan", change = "Change", low = "Lowest", high = "Highest",
+             avg = "Average", qty = "Average on sale", count = "Full scans", latest = "Last scanned" },
+}
+local HEADINGS = {
+    day  = { "Date", "Low", "High", "Quantity", "Daily Records" },
+    scan = { "Time", "Lowest buyout", "vs. previous", "On sale", "Scans" },
 }
 
 function ML:CreateSummary(d)
     local y0 = -12 - GH - 26
     AddSection(d, "Summary", y0, 12, -12)
-    d.sum = {}
+    d.sum, d.sumLabel = {}, {}
     local colW = math.floor((DW - 24) / 2)
-    for i, item in ipairs(SUMMARY) do
+    for i, key in ipairs(SUMMARY) do
         local col, rowN = (i - 1) % 2, math.floor((i - 1) / 2)
         local x, y = 14 + col * colW, y0 - 24 - rowN * 16
-        local label = AddLabel(d, item[2], "GameFontNormalSmall", C.muted)
+        local label = AddLabel(d, SUMMARY_LABELS.day[key], "GameFontNormalSmall", C.muted)
         label:SetPoint("TOPLEFT", x, y)
         local value = NoWrap(AddLabel(d, "", "GameFontHighlightSmall", C.text))
         value:SetPoint("TOPLEFT", x + 96, y)
         value:SetWidth(colW - 100)
-        d.sum[item[1]] = value
+        d.sum[key], d.sumLabel[key] = value, label
     end
 
     local y1 = y0 - 24 - 4 * 16 - 10
-    AddSection(d, "Daily Records", y1, 12, -12)
-    local headings = { { "Date", 16 }, { "Low", 122 }, { "High", 262 } }
-    for _, h in ipairs(headings) do
-        local fs = AddLabel(d, h[1], "GameFontNormalSmall", C.muted)
-        fs:SetPoint("TOPLEFT", h[2], y1 - 22)
+    d.recTitle = AddSection(d, "Daily Records", y1, 12, -12)
+    d.heads = {}
+    local xs = { 16, 122, 262 }
+    for i = 1, 3 do
+        local fs = AddLabel(d, "", "GameFontNormalSmall", C.muted)
+        fs:SetPoint("TOPLEFT", xs[i], y1 - 22)
+        d.heads[i] = fs
     end
-    local qh = AddLabel(d, "Quantity", "GameFontNormalSmall", C.muted)
-    qh:SetPoint("TOPRIGHT", -44, y1 - 22)
-    qh:SetJustifyH("RIGHT")
+    d.heads[4] = AddLabel(d, "", "GameFontNormalSmall", C.muted)
+    d.heads[4]:SetPoint("TOPRIGHT", -44, y1 - 22)
+    d.heads[4]:SetJustifyH("RIGHT")
 
     local listW = DW - 24 - 24
     local scroll, child = MakeScroll("MendeLedgerDayScroll", d, listW)
@@ -1482,6 +1620,7 @@ function ML:CreateSummary(d)
         row:SetSize(listW, DAY_ROW_H)
         row.date = NoWrap(AddLabel(row, "", "GameFontHighlightSmall", C.text))
         row.date:SetPoint("LEFT", 4, 0)
+        row.date:SetWidth(104)
         row.low = NoWrap(AddLabel(row, "", "GameFontHighlightSmall", C.text))
         row.low:SetPoint("LEFT", 110, 0)
         row.high = NoWrap(AddLabel(row, "", "GameFontHighlightSmall", C.text))
@@ -1492,30 +1631,48 @@ function ML:CreateSummary(d)
         return row
     end, function(row, r, idx)
         StripeRow(row, idx)
-        local t = ns.DayTime(r.d)
-        row.date:SetText(("%s  %s"):format(date("%a", t), ns.DayLabel(r.d)))
-        row.low:SetText(ns.Coins(r.l))
-        row.high:SetText(r.h > r.l and ns.Coins(r.h) or (GREY .. "same|r"))
-        row.qty:SetText(r.q > 0 and ns.Commas(r.q) or (GREY .. "—|r"))
+        if r.kind == "missed" then
+            row.date:SetText(GREY .. DateTimeOf(r.t) .. "|r")
+            row.low:SetText(GREY .. "not on sale (full scan)|r")
+            row.high:SetText("")
+            row.qty:SetText(GREY .. "0|r")
+        elseif r.kind == "scan" then
+            row.date:SetText(DateTimeOf(r.t))
+            row.low:SetText(ns.Coins(r.l))
+            row.high:SetText(r.prev and Percent((r.l - r.prev) / r.prev) or (GREY .. "—|r"))
+            row.qty:SetText(r.q > 0 and ns.Commas(r.q) or (GREY .. "—|r"))
+        else
+            local t = ns.DayTime(r.t)
+            row.date:SetText(("%s  %s"):format(date("%a", t), ns.DayLabel(r.t)))
+            row.low:SetText(ns.Coins(r.l))
+            row.high:SetText(r.h > r.l and ns.Coins(r.h) or (GREY .. "same|r"))
+            row.qty:SetText(r.q > 0 and ns.Commas(r.q) or (GREY .. "—|r"))
+        end
     end)
     d.dayEmpty = AddLabel(d, "", "GameFontNormalSmall", C.muted)
     d.dayEmpty:SetPoint("TOPLEFT", 18, y1 - 44)
+    self:SetRecordsMode(d, "day")
 end
 
-local function Summarize(L, startDay, endDay)
-    local st = { n = 0, sumLo = 0, sumQ = 0, nQ = 0 }
-    for i = 1, L.n do
-        local d = L.d[i]
-        if d >= startDay and d <= endDay then
-            local lo, hi, q = L.l[i], L.h[i], L.q[i]
-            st.n = st.n + 1
-            if st.n == 1 then st.firstLo = lo end
-            st.lastLo, st.lastHi, st.lastDay = lo, hi, d
-            if not st.minLo or lo < st.minLo then st.minLo, st.minDay = lo, d end
-            if not st.maxHi or hi > st.maxHi then st.maxHi, st.maxDay = hi, d end
-            st.sumLo = st.sumLo + lo
-            if q > 0 then st.sumQ, st.nQ = st.sumQ + q, st.nQ + 1 end
-        end
+function ML:SetRecordsMode(d, mode)
+    if d.recMode == mode then return end
+    d.recMode = mode
+    local h = HEADINGS[mode]
+    for i = 1, 4 do d.heads[i]:SetText(h[i]) end
+    d.recTitle:SetText(h[5])
+    for _, key in ipairs(SUMMARY) do d.sumLabel[key]:SetText(SUMMARY_LABELS[mode][key]) end
+end
+
+local function Summarize(S)
+    local st = { n = S.n, sumLo = 0, sumQ = 0, nQ = 0 }
+    for i = 1, S.n do
+        local lo, hi, q = S.lo[i], S.hi[i], S.q[i]
+        if i == 1 then st.firstLo = lo end
+        st.lastLo, st.lastT = lo, S.t[i]
+        if not st.minLo or lo < st.minLo then st.minLo, st.minT = lo, S.t[i] end
+        if not st.maxHi or hi > st.maxHi then st.maxHi, st.maxT = hi, S.t[i] end
+        st.sumLo = st.sumLo + lo
+        if q > 0 then st.sumQ, st.nQ = st.sumQ + q, st.nQ + 1 end
     end
     return st
 end
@@ -1528,8 +1685,9 @@ function ML:RefreshDetail()
     local idx = realmKey and Ledger.index[realmKey]
     local e = idx and self.selectedKey and idx.byKey[self.selectedKey] or nil
     self.selectedEntry = e
-    local L, bad
-    if e then L, bad = Ledger:History(realmKey, e.key) end
+    local S = e and self:BuildSeries(realmKey, e) or nil
+    local mode = (S and S.mode == "scan") and "scan" or "day"
+    self:SetRecordsMode(d, mode)
 
     -- header
     if e then
@@ -1545,8 +1703,10 @@ function ML:RefreshDetail()
         local spanDays = (e.last and e.first) and (e.last - e.first + 1) or 1
         lv.bar:SetMinMaxValues(0, spanDays)
         lv.bar:SetValue(e.count or 0)
-        lv.barText:SetText(("Recorded on %s of %s days since %s%s"):format(ns.Commas(e.count), ns.Commas(spanDays),
-            ns.DayLabel(e.first), (bad and bad > 0) and ("  —  %d blocks unreadable here"):format(bad) or ""))
+        local scans = Ledger:ScanHistory(realmKey, e.key)
+        lv.barText:SetText(("Recorded on %s of %s days since %s%s%s"):format(ns.Commas(e.count), ns.Commas(spanDays),
+            ns.DayLabel(e.first), (scans and scans.n > 0) and ("  •  %s scans kept"):format(ns.Commas(scans.n)) or "",
+            (S and S.bad > 0) and ("  —  %d blocks unreadable here"):format(S.bad) or ""))
     else
         lv.icon:SetTexture(LEDGER_ICON)
         lv.title:SetText("Auctionator Price History")
@@ -1557,42 +1717,49 @@ function ML:RefreshDetail()
         lv.barText:SetText("Select an item to see how its price has moved")
     end
 
-    self:DrawGraph(L, e)
+    self:UpdateViewButton(e and S)
+    self:DrawGraph(S, e)
 
     -- summary for the chosen range
-    local s = self.db.settings
+    for _, key in ipairs(SUMMARY) do d.sum[key]:SetText(GREY .. "—|r") end
     local rows = {}
-    for _, item in ipairs(SUMMARY) do d.sum[item[1]]:SetText(GREY .. "—|r") end
-    if e and L and L.n > 0 then
-        local endDay = math.max(ns.Today(), L.d[L.n])
-        local startDay = (s.range > 0) and (endDay - s.range + 1) or L.d[1]
-        local st = Summarize(L, startDay, endDay)
-        d.sum.price:SetText(ns.Coins(e.m))
-        local age = ns.Today() - e.last
-        d.sum.latest:SetText(("%s  %s(%s)|r"):format(ns.DayLabel(e.last), GREY,
-            age <= 0 and "today" or (age == 1 and "yesterday" or (age .. " days ago"))))
-        if st.n > 0 then
-            d.sum.change:SetText(st.n > 1 and (Percent((st.lastLo - st.firstLo) / st.firstLo) .. GREY .. "  over the range|r") or (GREY .. "needs 2 days|r"))
-            d.sum.low:SetText(("%s  %s(%s)|r"):format(ns.Coins(st.minLo), GREY, ns.DayLabel(st.minDay)))
-            d.sum.high:SetText(("%s  %s(%s)|r"):format(ns.Coins(st.maxHi), GREY, ns.DayLabel(st.maxDay)))
-            d.sum.avg:SetText(ns.Coins(st.sumLo / st.n))
-            d.sum.qty:SetText(st.nQ > 0 and ns.Commas(math.floor(st.sumQ / st.nQ + 0.5)) or (GREY .. "unknown|r"))
-            d.sum.days:SetText(("%s of %s"):format(ns.Commas(st.n), ns.Commas(endDay - startDay + 1)))
-        end
-        for i = L.n, 1, -1 do
-            local day = L.d[i]
-            if day < startDay then break end
-            if day <= endDay then rows[#rows + 1] = { d = day, l = L.l[i], h = L.h[i], q = L.q[i] } end
+    if e and S and S.n > 0 then
+        local st = Summarize(S)
+        local isScan = mode == "scan"
+        local function When(t) return isScan and ns.WhenLabel(t) or ns.DayLabel(t) end
+        d.sum.price:SetText(ns.Coins(isScan and st.lastLo or e.m))
+        d.sum.change:SetText(st.n > 1 and (Percent((st.lastLo - st.firstLo) / st.firstLo) .. GREY .. "  over the range|r")
+            or (GREY .. (isScan and "needs 2 scans|r" or "needs 2 days|r")))
+        d.sum.low:SetText(("%s  %s(%s)|r"):format(ns.Coins(st.minLo), GREY, When(st.minT)))
+        d.sum.high:SetText(("%s  %s(%s)|r"):format(ns.Coins(st.maxHi), GREY, When(st.maxT)))
+        d.sum.avg:SetText(ns.Coins(st.sumLo / st.n))
+        d.sum.qty:SetText(st.nQ > 0 and ns.Commas(math.floor(st.sumQ / st.nQ + 0.5)) or (GREY .. "unknown|r"))
+        if isScan then
+            local missed = #(S.breaks or {})
+            d.sum.count:SetText(S.fulls > 0 and ("listed in %d of %d"):format(S.fulls - missed, S.fulls) or (GREY .. "none in range|r"))
+            d.sum.latest:SetText(ns.Ago(st.lastT))
+            -- every scan, newest first, with the full scans the item missed
+            local missedT, mi = S.breaks or {}, #(S.breaks or {})
+            for i = S.n, 1, -1 do
+                while mi >= 1 and missedT[mi] > S.t[i] do
+                    rows[#rows + 1] = { kind = "missed", t = missedT[mi] }
+                    mi = mi - 1
+                end
+                rows[#rows + 1] = { kind = "scan", t = S.t[i], l = S.lo[i], q = S.q[i], prev = S.lo[i - 1] }
+            end
+            for k = mi, 1, -1 do rows[#rows + 1] = { kind = "missed", t = missedT[k] } end
+        else
+            d.sum.count:SetText(("%s of %s"):format(ns.Commas(st.n), ns.Commas(S.to - S.from + 1)))
+            local age = ns.Today() - e.last
+            d.sum.latest:SetText(("%s  %s(%s)|r"):format(ns.DayLabel(e.last), GREY,
+                age <= 0 and "today" or (age == 1 and "yesterday" or (age .. " days ago"))))
+            for i = S.n, 1, -1 do
+                rows[#rows + 1] = { kind = "day", t = S.t[i], l = S.lo[i], h = S.hi[i], q = S.q[i] }
+            end
         end
     end
     d.dayList:SetData(rows, true)
-    if not e then
-        d.dayEmpty:SetText("")
-    elseif #rows == 0 then
-        d.dayEmpty:SetText("No records in this range.")
-    else
-        d.dayEmpty:SetText("")
-    end
+    d.dayEmpty:SetText((e and #rows == 0) and "No records in this range." or "")
 end
 
 -------------------------------------------------------------------------------
@@ -1600,7 +1767,7 @@ end
 -------------------------------------------------------------------------------
 local OPT_LEFT_R, OPT_RIGHT_X = 430, 450
 local KEEP = { { 0, "Forever" }, { 730, "2 years" }, { 365, "1 year" }, { 180, "180 days" }, { 90, "90 days" } }
-local STORAGE = { "Realm", "Items", "Daily prices", "Stored", "As Lua tables", "Sealed blocks", "Saved by compression", "Auctionator keeps" }
+local STORAGE = { "Realm", "Items", "Daily prices", "Stored", "As Lua tables", "Sealed blocks", "Saved by compression", "Scan detail" }
 
 function ML:CreateOptionsView(f)
     local ov = CreateFrame("Frame", nil, f)
@@ -1620,70 +1787,90 @@ function ML:CreateOptionsView(f)
     ---------------------------------------------------------------- Recording
     AddSection(ov, "Recording", -46, 20, LEFT_RULE)
     ov.intro = AddLabel(ov, "", nil, C.muted)
-    ov.intro:SetPoint("TOPLEFT", 22, -70)
+    ov.intro:SetPoint("TOPLEFT", 22, -68)
     ov.intro:SetWidth(LW)
     if ov.intro.SetSpacing then ov.intro:SetSpacing(2) end
 
-    ov.autoCheck = MakeCheck(ov, 18, -104, "Record after auction house scans", "Record automatically",
-        "A few seconds after you close the auction house (and after a full scan arrives), MendeLedger copies Auctionator's newest prices into the ledger. It also records shortly after you log in.",
+    ov.autoCheck = MakeCheck(ov, 18, -100, "Record after auction house scans", "Record automatically",
+        "A few seconds after you close the auction house (and after each scan while it stays open), MendeLedger copies Auctionator's newest daily prices into the ledger. It also records shortly after you log in.",
         function(on) ML.db.settings.autoRecord = on end)
 
     local record = MenuButton(ov, "Record Now", 120)
-    record:SetPoint("TOPLEFT", 20, -134)
+    record:SetPoint("TOPLEFT", 20, -128)
     record:SetScript("OnClick", function() Ledger:RecordNow("button", false); ML:UpdateRecordingStatus() end)
     AddHoverTip(record, "Record Now", "Copy Auctionator's prices for the realm you are on into the ledger right away.")
     local import = MenuButton(ov, "Import Realms", 130)
-    import:SetPoint("TOPLEFT", 148, -134)
+    import:SetPoint("TOPLEFT", 148, -128)
     import:SetScript("OnClick", function() Ledger:ImportAll() end)
     AddHoverTip(import, "Import Realms", "Record every realm Auctionator has prices for, including realms your other characters scanned. Safe to repeat: nothing is counted twice.")
 
     ov.status1 = NoWrap(AddLabel(ov, "", "GameFontNormalSmall", C.text))
-    ov.status1:SetPoint("TOPLEFT", 22, -166)
+    ov.status1:SetPoint("TOPLEFT", 22, -160)
     ov.status1:SetWidth(LW)
     ov.status2 = NoWrap(AddLabel(ov, "", "GameFontNormalSmall", C.muted))
-    ov.status2:SetPoint("TOPLEFT", 22, -181)
+    ov.status2:SetPoint("TOPLEFT", 22, -174)
     ov.status2:SetWidth(LW)
 
+    ---------------------------------------------------------------- Scan Detail
+    AddSection(ov, "Scan Detail", -196, 20, LEFT_RULE)
+    ov.scanCheck = MakeCheck(ov, 18, -218, "Keep every Auctionator scan", "Scan detail",
+        "Auctionator keeps one low, high and quantity per day. With this on, MendeLedger also keeps each scan's lowest buyout and the number on sale, with the time, so the 24H, 3D and 7D ranges can show how prices move during the day.",
+        function(on) ML:SetRecordScans(on) end)
+    local sdesc = AddLabel(ov, "Each scan's lowest buyout and number on sale, with the time. Old scan detail expires; daily prices stay.", nil, C.muted)
+    sdesc:SetPoint("TOPLEFT", 46, -244)
+    sdesc:SetWidth(OPT_LEFT_R - 66)
+    if sdesc.SetSpacing then sdesc:SetSpacing(2) end
+    local keepLabel = AddLabel(ov, "Keep for", "GameFontNormalSmall", C.muted)
+    keepLabel:SetPoint("TOPLEFT", 22, -282)
+    ov.scanKeepButtons = {}
+    local sx = 80
+    for _, days in ipairs({ 7, 14, 30 }) do
+        local b = FlatButton(ov, days .. " days", 64, 20)
+        b:SetPoint("TOPLEFT", sx, -278)
+        sx = sx + 68
+        b.days = days
+        b:SetScript("OnClick", function(self) ML:SetKeepScanDays(self.days) end)
+        AddHoverTip(b, ("Keep %d days of scan detail"):format(days), "Removed a sealed block (128 scans of an item) at a time, so a little more can remain.")
+        ov.scanKeepButtons[#ov.scanKeepButtons + 1] = b
+    end
+    ov.scanStatus = NoWrap(AddLabel(ov, "", "GameFontNormalSmall", C.text))
+    ov.scanStatus:SetPoint("TOPLEFT", 22, -306)
+    ov.scanStatus:SetWidth(LW)
+
     ---------------------------------------------------------------- Compression
-    AddSection(ov, "Compression", -206, 20, LEFT_RULE)
-    ov.compressCheck = MakeCheck(ov, 18, -229, "Compress sealed history", "Compress sealed history",
-        "Sealed blocks are compressed only when that makes them at least 10% smaller. Turning this off unpacks them again.",
+    AddSection(ov, "Compression", -330, 20, LEFT_RULE)
+    ov.compressCheck = MakeCheck(ov, 18, -352, "Compress sealed history", "Compress sealed history",
+        "Each item's history is packed at about 6 bytes per record. Every 128 records become a sealed block that is never rewritten, compressed only when that makes it at least 10% smaller. Turning this off unpacks them again.",
         function(on) ML:SetCompress(on) end)
-    local cdesc = AddLabel(ov, "Each day costs about 6 bytes per item. Every 128 recorded days of an item are sealed into a block that is never rewritten, and compressed only when that makes it at least 10% smaller.", nil, C.muted)
-    cdesc:SetPoint("TOPLEFT", 46, -256)
-    cdesc:SetWidth(OPT_LEFT_R - 66)
-    if cdesc.SetSpacing then cdesc:SetSpacing(2) end
     ov.method = NoWrap(AddLabel(ov, "", "GameFontNormalSmall", C.text))
-    ov.method:SetPoint("TOPLEFT", 22, -306)
-    ov.method:SetWidth(LW)
+    ov.method:SetPoint("TOPLEFT", 22, -380)
+    ov.method:SetWidth(LW - 104)
     local repack = FlatButton(ov, "Repack Now", 96, 20)
-    repack:SetPoint("TOPLEFT", 22, -324)
+    repack:SetPoint("TOPLEFT", OPT_LEFT_R - 22 - 96, -376)
     repack:SetScript("OnClick", function() Ledger:Repack(false) end)
     AddHoverTip(repack, "Repack Now", "Re-store every sealed block to match the setting above. Only needed after changing it; it runs in the background.")
 
     ---------------------------------------------------------------- Keep History
-    AddSection(ov, "Keep History", -362, 20, LEFT_RULE)
+    AddSection(ov, "Keep Daily History", -408, 20, LEFT_RULE)
     ov.keepButtons = {}
     local kx = 22
     for _, k in ipairs(KEEP) do
         local b = FlatButton(ov, k[2], k[1] == 0 and 66 or 72, 20)
-        b:SetPoint("TOPLEFT", kx, -386)
+        b:SetPoint("TOPLEFT", kx, -432)
         kx = kx + (k[1] == 0 and 66 or 72) + 4
         b.days = k[1]
         b:SetScript("OnClick", function(self) ML:SetKeepDays(self.days) end)
+        AddHoverTip(b, k[1] == 0 and "Keep all daily prices" or ("Keep %s of daily prices"):format(k[2]),
+            "Older daily prices are removed after the next recording, a sealed block at a time, so up to 128 extra days can remain.")
         ov.keepButtons[#ov.keepButtons + 1] = b
     end
-    local kdesc = AddLabel(ov, "Older prices are removed after the next recording, a sealed block at a time, so up to 128 extra days can remain.", nil, C.muted)
-    kdesc:SetPoint("TOPLEFT", 22, -414)
-    kdesc:SetWidth(LW)
-    if kdesc.SetSpacing then kdesc:SetSpacing(2) end
 
     ---------------------------------------------------------------- Display
-    AddSection(ov, "Display", -456, 20, LEFT_RULE)
-    ov.minimapCheck = MakeCheck(ov, 18, -479, "Show minimap button", nil, nil,
+    AddSection(ov, "Display", -468, 20, LEFT_RULE)
+    ov.minimapCheck = MakeCheck(ov, 18, -490, "Show minimap button", nil, nil,
         function(on) ML:SetMinimapButtonShown(on) end)
-    ov.announceCheck = MakeCheck(ov, 18, -505, "Print a line in chat after each recording", "Recording messages",
-        "When a recording adds prices, one line in chat says how many. Recordings that find nothing new stay quiet.",
+    ov.announceCheck = MakeCheck(ov, 18, -514, "Print a line in chat after each recording", "Recording messages",
+        "When a recording adds daily prices, one line in chat says how many. Scans and recordings that find nothing new stay quiet.",
         function(on) ML.db.settings.announce = on end)
 
     ---------------------------------------------------------------- Storage
@@ -1766,6 +1953,17 @@ end
 function ML:UpdateRecordingStatus()
     local ov = self.frame and self.frame.optionsView
     if not ov then return end
+    local scanJob = ns.FindJob("scan")
+    if scanJob then
+        local done, total = scanJob:Progress()
+        ov.scanStatus:SetText(("Saving a scan: %s of %s items"):format(ns.Commas(done), ns.Commas(total)))
+    elseif not self.db.settings.recordScans then
+        ov.scanStatus:SetText(GREY .. "Off: only daily prices are kept.|r")
+    elseif not Ledger.scanHook then
+        ov.scanStatus:SetText(GREY .. "Waiting for Auctionator (it must be loaded).|r")
+    else
+        ov.scanStatus:SetText(Ledger.scanStatus or "No scan seen this session yet.")
+    end
     local job = ns.FindJob("record")
     if job then
         local done, total = job:Progress()
@@ -1784,7 +1982,7 @@ function ML:RefreshOptions()
     if not f or not f.optionsView:IsShown() then return end
     local ov, s = f.optionsView, self.db.settings
 
-    ov.intro:SetText(("Auctionator keeps prices for its last %d days. MendeLedger copies every day into its own ledger, so the history keeps growing after Auctionator forgets it."):format(Ledger:AuctionatorDays()))
+    ov.intro:SetText(("Auctionator keeps its last %d days of prices. MendeLedger copies each day into its own ledger, which keeps growing."):format(Ledger:AuctionatorDays()))
     ov.autoCheck:SetChecked(s.autoRecord)
     ov.compressCheck:SetChecked(s.compress)
     ov.minimapCheck:SetChecked(not self.db.minimap.hide)
@@ -1792,6 +1990,8 @@ function ML:RefreshOptions()
     ov.method:SetText(Ledger:CanCompress() and ("Method: " .. Ledger.compressMethod)
         or (GREY .. "Deflate isn't available on this client, so history is packed but not compressed.|r"))
     for _, b in ipairs(ov.keepButtons) do SetFlatSelected(b, b.days == s.keepDays) end
+    ov.scanCheck:SetChecked(s.recordScans)
+    for _, b in ipairs(ov.scanKeepButtons) do SetFlatSelected(b, b.days == s.keepScanDays) end
     self:UpdateRecordingStatus()
 
     -- storage
@@ -1811,7 +2011,12 @@ function ML:RefreshOptions()
     else
         vals[1] = key and Ledger:RealmName(key) or (GREY .. "none yet|r")
     end
-    vals[8] = ("%d days"):format(Ledger:AuctionatorDays())
+    local ss = realm and realm.scanStats
+    if ss and ss.scans > 0 then
+        vals[8] = ("%s scans, %s  %s(%s saved)|r"):format(ns.Commas(ss.scans), ns.Bytes(ss.bytes), GREY, ns.Bytes(math.max(0, ss.unpacked - ss.bytes)))
+    else
+        vals[8] = GREY .. "no scans kept yet|r"
+    end
     for i, fs in ipairs(ov.storage) do fs:SetText(vals[i] or (GREY .. "—|r")) end
 
     -- realms
@@ -1837,6 +2042,19 @@ function ML:SetCompress(on)
     self.db.settings.compress = on and true or false
     ns.Print("compression of sealed history is " .. (on and "on" or "off") .. "; repacking in the background.")
     Ledger:Repack(true)
+    self:RequestUIRefresh()
+end
+
+function ML:SetRecordScans(on)
+    self.db.settings.recordScans = on and true or false
+    ns.Print(on and "keeping every Auctionator scan (prices by time of day)." or "scan detail off; scans already kept stay until they expire.")
+    self:RequestUIRefresh()
+end
+
+function ML:SetKeepScanDays(days)
+    self.db.settings.keepScanDays = days
+    ns.Print(("keeping %d days of scan detail."):format(days))
+    for key in pairs(self.db.realms) do Ledger:PruneScans(key, true) end
     self:RequestUIRefresh()
 end
 

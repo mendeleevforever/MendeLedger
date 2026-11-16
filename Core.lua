@@ -23,7 +23,7 @@ local ML = {}
 ns.ML = ML
 _G.MendeLedger = ML
 
-ML.VERSION          = "0.1.0"
+ML.VERSION          = "0.2.0"
 ML.TESTED_INTERFACE = 16001                                   -- RETEST: the build this was written against
 ML.PREFIX           = "|cffe6b422MendeLedger:|r "
 
@@ -170,6 +170,31 @@ function ns.DayDate(day)                  -- "Nov 4, 2026"
     return ("%s %d, %s"):format(date("%b", t), tonumber(date("%d", t)), date("%Y", t))
 end
 
+-- Time of day, following the game clock's 12/24-hour setting
+local function Use24Hour()
+    local get = (C_CVar and C_CVar.GetCVarBool) or rawget(_G, "GetCVarBool")   -- RETEST
+    local v = get and ns.SafeCall(get, "timeMgrUseMilitaryTime")
+    if v == nil then return true end
+    return v and true or false
+end
+
+function ns.TimeLabel(t)                  -- "14:30" or "2:30 PM"
+    t = ns.Num(t)
+    if not t then return "?" end
+    if Use24Hour() then return date("%H:%M", t) end
+    local h = tonumber(date("%H", t))
+    local suffix = h >= 12 and "PM" or "AM"
+    h = h % 12
+    if h == 0 then h = 12 end
+    return ("%d:%s %s"):format(h, date("%M", t), suffix)
+end
+
+function ns.WhenLabel(t)                  -- "Mon 2:30 PM"
+    t = ns.Num(t)
+    if not t then return "?" end
+    return ("%s %s"):format(date("%a", t), ns.TimeLabel(t))
+end
+
 function ns.Ago(t)
     t = ns.Num(t)
     if not t or t <= 0 then return "never" end
@@ -191,6 +216,9 @@ ns.DEFAULTS = {
         compress    = true,       -- compress sealed blocks when useful
         keepDays    = 0,          -- 0 = keep everything
         announce    = true,       -- one chat line after a recording that added prices
+        recordScans = true,       -- keep every Auctionator scan (prices by time of day)
+        keepScanDays = 14,        -- how long scan detail is kept (7, 14 or 30)
+        useScans    = true,       -- ranges up to 7 days show every scan when there is scan detail
         range       = 30,         -- graph range in days, 0 = all
         showQty     = true,
         showBand    = true,
@@ -242,6 +270,22 @@ function ML:InitDB()
                 if type(k) ~= "string" or type(s) ~= "string" then r.items[k] = nil end
             end
             r.settled = ns.Num(r.settled)
+            local sc = r.scans
+            if sc ~= nil and type(sc) ~= "table" then
+                r.scans = nil
+            elseif sc then
+                for _, field in ipairs({ "log", "count", "full", "items" }) do
+                    if type(sc[field]) ~= "table" then sc[field] = {} end
+                end
+                for k, v in pairs(sc.items) do
+                    if type(k) ~= "string" or type(v) ~= "string" then sc.items[k] = nil end
+                end
+                sc.seq = ns.Num(sc.seq) or 0
+                for id in pairs(sc.log) do
+                    if type(id) == "number" and id > sc.seq then sc.seq = id end
+                end
+                sc.lastFull = ns.Num(sc.lastFull) or 0
+            end
         end
     end
     for k, v in pairs(db.names) do
@@ -425,6 +469,8 @@ local HELP = {
     { "/mendel realm <name>", "show another realm's history" },
     { "/mendel keep <days | forever>", "how long to keep history (e.g. /mendel keep 365)" },
     { "/mendel compress on | off", "compress sealed history (when it saves 10% or more)" },
+    { "/mendel scans on | off", "keep every Auctionator scan, for prices by time of day" },
+    { "/mendel keepscans <7 | 14 | 30>", "how many days of scan detail to keep" },
     { "/mendel repack", "re-store sealed history to match the compression setting" },
     { "/mendel stats", "storage used by the ledger" },
     { "/mendel minimap", "show / hide the minimap button" },
@@ -472,6 +518,22 @@ commands.compress = function(rest)
         return
     end
     ML:SetCompress(rest == "on")
+end
+commands.scans = function(rest)
+    rest = rest:lower()
+    if rest ~= "on" and rest ~= "off" then
+        ns.Print("scan detail is " .. (ML.db.settings.recordScans and "on" or "off") .. ". Use /mendel scans on or off.")
+        return
+    end
+    ML:SetRecordScans(rest == "on")
+end
+commands.keepscans = function(rest)
+    local days = tonumber(rest)
+    if days ~= 7 and days ~= 14 and days ~= 30 then
+        ns.Print("use /mendel keepscans 7, 14 or 30.")
+        return
+    end
+    ML:SetKeepScanDays(days)
 end
 commands.keep = function(rest)
     rest = rest:lower()
