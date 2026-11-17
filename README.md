@@ -8,7 +8,7 @@ Auctionator only remembers the last 21 days of prices (by default). MendeLedger 
 
 - Keeps the daily lowest price, highest price and quantity of every item Auctionator scans, for as long as you like
 - Optional scan detail: keeps every Auctionator scan with its time, so you can see how prices change during the day
-- Search every recorded item by name or item ID, grouped by item type
+- Search everything in an item's tooltip, not just its name: weapon and armor types, slots, stats, effects and set bonuses
 - Price graph with ranges from 24 hours to all time; hover any point to see its prices
 - A summary for the chosen range: latest price, change, lowest, highest and averages
 - Shift-click an item to link it in chat
@@ -60,8 +60,8 @@ Good to know:
 ## The window
 
 **Left side**
-- Search box: type part of an item's name, or an item ID. With the search box selected, shift-click an item in your bags to search for it.
-- **Filter**: sort by name, latest price, 7-day change or days recorded; show only items seen in the last 7 days or with 2 or more days of prices; group by item type; expand or collapse all item types.
+- Search box: finds items by name, item type and anything in their tooltip (see Searching below). With the search box selected, shift-click an item in your bags to search for it.
+- **Filter**: sort by name, latest price, 7-day change or days recorded; search item tooltips or only names and types; show only items seen in the last 7 days or with 2 or more days of prices; group by item type; expand or collapse all item types.
 - The item list, grouped under item-type bars. Click a bar to open or close it.
 
 **Right side**
@@ -74,6 +74,19 @@ Good to know:
 - **Daily Records** (or **Scans** in scan view): every day or scan in the range, newest first.
 
 The bar above the graph shows on how many days the item has been recorded since it was first seen.
+
+## Searching
+
+The search box looks at each item's name, its type and slot, and everything in its tooltip. So "sword" finds every sword, even ones without "sword" in the name, and you can search for stats, effects and set bonuses.
+
+- Every word you type must match, in any order: `set stamina` finds set items with a Stamina bonus.
+- Put a phrase in quotes to match it exactly: `"increased defense"`.
+- A number on its own finds the item with that item ID.
+- Capital letters don't matter.
+
+Some searches to try: `sword`, `plate legs`, `binds when equipped`, `critical strike`, `"chance on hit"`, `strongholds`.
+
+Tooltips are read in the background after you open the window, which takes a few seconds the first time in each session. To search names and item types only, turn off **Search item tooltips** in the **Filter** menu.
 
 ## Options tab
 
@@ -93,7 +106,7 @@ Click the gear tab on the right edge of the window.
 | Command | What it does |
 |---|---|
 | `/mendel` | open or close the window |
-| `/mendel <text>` | open the window and search for an item |
+| `/mendel <text>` | open the window and search (names, types, stats, effects or an item ID) |
 | `/mendel record` | record Auctionator's prices now |
 | `/mendel import` | record every realm Auctionator has prices for |
 | `/mendel realms` | list the realms in your history |
@@ -122,6 +135,8 @@ Scan detail takes more. Scanning every 30 minutes all day can add about half a m
 **Nothing is recorded.** Make sure Auctionator is enabled and has scanned the auction house, then close the auction house or type `/mendel record`.
 
 **Items show as "Item #12345".** Item names are loaded from the server and appear after a short while.
+
+**A search misses items right after opening the window.** Tooltips are still being read; the line under the title shows the progress, and the results fill in as it finishes.
 
 **"No scans of this item in this range."** Scan detail only exists for scans made while MendeLedger was enabled. The daily view is shown instead.
 

@@ -23,7 +23,7 @@ local ML = {}
 ns.ML = ML
 _G.MendeLedger = ML
 
-ML.VERSION          = "0.2.1"
+ML.VERSION          = "0.2.2"
 ML.TESTED_INTERFACE = 16001                                   -- RETEST: the build this was written against
 ML.PREFIX           = "|cffe6b422MendeLedger:|r "
 
@@ -224,6 +224,7 @@ ns.DEFAULTS = {
         showBand    = true,
         sort        = "name",     -- name | price | change | days
         groupByType = true,
+        searchTooltips = true,    -- search item tooltips (stats, effects, set bonuses), not just names
         recentOnly  = false,
         multiDay    = false,
         lastTab     = "ledger",
@@ -444,6 +445,8 @@ function ns.Probe()
     Add("Item loading", C_Item and C_Item.RequestLoadItemDataByID and ns.eventOK.ITEM_DATA_LOAD_RESULT,
         "C_Item.RequestLoadItemDataByID + ITEM_DATA_LOAD_RESULT")   -- RETEST
     Add("Secret values", true, issecretvalue and "issecretvalue present: guards active" or "issecretvalue absent: guards idle")
+    Add("Tooltip search", true, (C_TooltipInfo and C_TooltipInfo.GetItemByID) and "reads tooltips with C_TooltipInfo.GetItemByID"
+        or "C_TooltipInfo missing: reads tooltips with a hidden tooltip")
     Add("Scan events", ns.eventOK.AUCTION_HOUSE_CLOSED,
         ns.eventOK.REPLICATE_ITEM_LIST_UPDATE and "AUCTION_HOUSE_CLOSED, REPLICATE_ITEM_LIST_UPDATE" or "AUCTION_HOUSE_CLOSED only")
     if ns.Ledger and ns.Ledger.SourceProbe then ns.Ledger:SourceProbe(Add) end
@@ -462,7 +465,7 @@ end
 -------------------------------------------------------------------------------
 local HELP = {
     { "/mendel", "open / close the window" },
-    { "/mendel <text>", "open the window and search for an item (name or item ID)" },
+    { "/mendel <text>", "open the window and search (names, types, stats, effects, set bonuses or an item ID)" },
     { "/mendel record", "record Auctionator's prices now" },
     { "/mendel import", "record every realm Auctionator has prices for" },
     { "/mendel realms", "list the realms in the ledger" },

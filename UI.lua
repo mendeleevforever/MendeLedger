@@ -525,7 +525,9 @@ function ML:OnJobProgress()
     self:UpdateInfoLine()
     if self.currentTab == "options" then self:UpdateRecordingStatus() end
     local job = ns.CurrentJob()
-    if job and job.name == "index" and self.currentTab == "ledger" then self:RefreshLedger() end
+    if job and self.currentTab == "ledger" and (job.name == "index" or (job.name == "tooltips" and self.searchActive)) then
+        self:RefreshLedger()
+    end
 end
 
 function ML:UpdateInfoLine()
@@ -711,9 +713,11 @@ function ML:CreateLedgerView(f)
 
     local search = MakeSearchBox("MendeLedgerSearchBox", lv, 214)
     search:SetPoint("TOPLEFT", LEFT_X + 6, CONTENT_TOP - 5)
-    AddPlaceholder(search, "Search items or item ID")
+    AddPlaceholder(search, "Search names and tooltips")
     search:HookScript("OnTextChanged", function() ML:RequestUIRefresh(0.12) end)
-    AddHoverTip(search, "Search", "Matches item names (once the game has loaded them) and item IDs. With the box selected, shift-click an item in your bags to search for it.")
+    AddHoverTip(search, "Search", "Matches item names, item types and tooltip text: weapon and armor types, slots, stats, effects and set bonuses. "
+        .. "Every word must match; put a phrase in quotes to match it exactly, like \"increased defense\". A number on its own finds that item ID. "
+        .. "With the box selected, shift-click an item in your bags to search for it.")
     f.search = search
 
     local filter = FlatButton(lv, "Filter  |cffffd100>|r", 84, 22)
@@ -889,8 +893,10 @@ function ML:BuildEntries(realmKey, searchText)
     local idx = Ledger:GetIndex(realmKey)
     if not idx then return {}, 0 end
     local s = self.db.settings
-    local search = ns.Trim(searchText or ""):lower()
-    local searchId = tonumber(search)
+    local terms = Ledger.ParseSearch(searchText)
+    local searching = #terms > 0
+    local useTips = s.searchTooltips
+    self.searchActive = searching
     local recentFrom = ns.Today() - 7
     local groups, total = {}, 0
     for _, e in pairs(idx.byKey) do
@@ -898,9 +904,7 @@ function ML:BuildEntries(realmKey, searchText)
         local pass = true
         if s.recentOnly and (not e.last or e.last < recentFrom) then pass = false end
         if s.multiDay and (e.count or 0) < 2 then pass = false end
-        if pass and search ~= "" then
-            pass = (e.lname and e.lname:find(search, 1, true)) or (searchId and e.id == searchId) or false
-        end
+        if pass and searching then pass = Ledger:Matches(e, terms, useTips) end
         if pass then
             e.sn = e.lname or ("~" .. e.key)
             local gname = s.groupByType and (e.typeName or OTHER) or ""
@@ -919,7 +923,7 @@ function ML:BuildEntries(realmKey, searchText)
     local entries = {}
     for _, gname in ipairs(names) do
         local list = groups[gname]
-        local collapsed = s.groupByType and self.db.collapsed[gname] and search == ""
+        local collapsed = s.groupByType and self.db.collapsed[gname] and not searching
         if s.groupByType then
             entries[#entries + 1] = { header = true, name = gname, n = #list, collapsed = collapsed }
         end
@@ -961,6 +965,7 @@ function ML:RefreshLedger(resetScroll)
     end
     local search = f.search:GetText() or ""
     local entries, total, ready = self:BuildEntries(realmKey, search)
+    if ready then Ledger:EnsureTooltips(realmKey) end
     lv.itemList:SetData(entries, resetScroll or search ~= self.lastSearch)
     self.lastSearch = search
 
@@ -976,7 +981,13 @@ function ML:RefreshLedger(resetScroll)
         empty = "Reading the ledger..."
     elseif #entries == 0 then
         if ns.Trim(search) ~= "" then
-            empty = ("No item matches \"%s\".\n\nNames appear once the game has loaded them; an item ID always works."):format(ns.Trim(search))
+            local done, total = Ledger:TooltipProgress()
+            if done and self.db.settings.searchTooltips then
+                empty = ("No item matches \"%s\" yet.\n\nItem tooltips are still being read (%s of %s)."):format(
+                    ns.Trim(search), ns.Commas(done), ns.Commas(total))
+            else
+                empty = ("No item matches \"%s\".\n\nNames appear once the game has loaded them; an item ID always works."):format(ns.Trim(search))
+            end
         else
             empty = "No item passes the filters.\n\nCheck the Filter menu."
         end
@@ -1004,6 +1015,7 @@ local FILTER_ITEMS = {
     { text = "7-day change", radio = "sort", value = "change" },
     { text = "Days recorded", radio = "sort", value = "days" },
     { separator = true },
+    { text = "Search item tooltips", setting = "searchTooltips" },
     { text = "Group by item type", setting = "groupByType" },
     { text = "Only items seen in the last 7 days", setting = "recentOnly" },
     { text = "Only items with 2 or more days", setting = "multiDay" },
@@ -1933,7 +1945,7 @@ function ML:CreateOptionsView(f)
     ---------------------------------------------------------------- Client
     AddSection(ov, "Client", -376, OPT_RIGHT_X, -20)
     ov.probe = {}
-    for i = 1, 12 do
+    for i = 1, 14 do
         local b = CreateFrame("Button", nil, ov)
         b:SetSize(RW - 4, 14)
         b:SetPoint("TOPLEFT", OPT_RIGHT_X + 2, -400 - (i - 1) * 15)

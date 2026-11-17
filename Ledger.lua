@@ -538,7 +538,7 @@ end
 -- Item names: cached in MendeLedgerDB, loaded from the server a few at a time
 -------------------------------------------------------------------------------
 local urgent, normal = { head = 1, tail = 0 }, { head = 1, tail = 0 }
-local queued, queuedUrgent, pending, failed = {}, {}, {}, {}
+local queued, queuedUrgent, pending, failed, forced = {}, {}, {}, {}, {}
 local outstanding = 0
 local nameTicker
 
@@ -612,7 +612,7 @@ local function NameTick()
         local id = Pop(urgent) or Pop(normal)
         if not id then break end
         queued[id], queuedUrgent[id] = nil, nil
-        if not pending[id] and not failed[id] and not Ledger:CachedName(id) then
+        if not pending[id] and not failed[id] and (forced[id] or not Ledger:CachedName(id)) then
             pending[id] = now
             outstanding = outstanding + 1
             sent = sent + 1
@@ -630,8 +630,10 @@ local function NameTick()
     end
 end
 
-function Ledger:QueueName(id, isUrgent)
+-- force: load the item even if its name is already cached (tooltips need the item itself)
+function Ledger:QueueName(id, isUrgent, force)
     if type(id) ~= "number" or failed[id] or pending[id] then return end
+    if force then forced[id] = true end
     if isUrgent then
         if queuedUrgent[id] then return end
         queuedUrgent[id] = true
@@ -648,10 +650,188 @@ local function OnItemLoaded(itemID, success)
     if not itemID or not pending[itemID] then return end
     pending[itemID] = nil
     outstanding = outstanding - 1
-    if success == false then failed[itemID] = true return end
+    local wasForced = forced[itemID]
+    forced[itemID] = nil
+    if success == false then
+        failed[itemID] = true
+        Ledger:TooltipArrived(itemID, false)
+        return
+    end
     if Ledger:ItemName(itemID) then
         Ledger:NameArrived(itemID)
     end
+    if wasForced then Ledger:TooltipArrived(itemID, true) end
+end
+
+-------------------------------------------------------------------------------
+-- Tooltip text for searching: kept for the session only (not saved), keyed by
+-- item ID and shared by every realm. Read with C_TooltipInfo, which builds a
+-- tooltip's text without showing anything; a hidden tooltip is the fallback.
+-- Reading stops at the "Sell Price" line, so lines other addons append after
+-- it (Auctionator's Vendor and Auction prices, for example) never match.
+-------------------------------------------------------------------------------
+Ledger.tips = {}                  -- [itemID] = lower-case tooltip text, one line per row
+local tipWanted, tipFailed = {}, {}
+local scanTip
+
+local SELL_PRICE_TEXT = Text(rawget(_G, "SELL_PRICE"))            -- RETEST: "Sell Price"
+local RETRIEVING_TEXT = Text(rawget(_G, "RETRIEVING_ITEM_INFO"))  -- RETEST: "Retrieving item information"
+
+local function Clean(v)
+    v = Text(v)
+    if not v then return nil end
+    v = v:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("|T.-|t", ""):gsub("|A.-|a", "")
+         :gsub("|H.-|h(.-)|h", "%1"):gsub("|n", " ")
+    v = ns.Trim(v)
+    return v ~= "" and v or nil
+end
+
+local function StartsWith(text, prefix)
+    return prefix ~= nil and text:sub(1, #prefix) == prefix
+end
+
+-- The text lines of an item's tooltip, or nil when the game hasn't loaded the item yet
+local function TooltipLines(id)
+    local out = {}
+    local function Add(left, right)
+        if left then out[#out + 1] = left end
+        if right then out[#out + 1] = right end
+    end
+    if C_TooltipInfo and C_TooltipInfo.GetItemByID then                    -- RETEST
+        local data = ns.SafeCall(C_TooltipInfo.GetItemByID, id)
+        if type(data) ~= "table" or type(data.lines) ~= "table" then return nil end
+        local types = Enum and Enum.TooltipDataLineType
+        local sellType = types and types.SellPrice                          -- RETEST
+        for _, line in ipairs(data.lines) do
+            if type(line) == "table" then
+                if sellType and line.type == sellType then break end
+                local left, right = Clean(line.leftText), Clean(line.rightText)
+                if left and RETRIEVING_TEXT and left == RETRIEVING_TEXT then return nil end
+                if left and StartsWith(left, SELL_PRICE_TEXT) then break end
+                Add(left, right)
+            end
+        end
+        return #out > 0 and out or nil
+    end
+    if not scanTip then
+        scanTip = CreateFrame("GameTooltip", "MendeLedgerScanTooltip", UIParent, "GameTooltipTemplate")   -- RETEST
+    end
+    scanTip:SetOwner(UIParent, "ANCHOR_NONE")
+    scanTip:ClearLines()
+    if not pcall(scanTip.SetItemByID, scanTip, id) then scanTip:Hide() return nil end
+    for i = 1, scanTip:NumLines() or 0 do
+        local lfs, rfs = _G["MendeLedgerScanTooltipTextLeft" .. i], _G["MendeLedgerScanTooltipTextRight" .. i]
+        local left = lfs and Clean(lfs:GetText())
+        local right = rfs and rfs:IsShown() and Clean(rfs:GetText()) or nil
+        if left and RETRIEVING_TEXT and left == RETRIEVING_TEXT then scanTip:Hide() return nil end
+        if left and StartsWith(left, SELL_PRICE_TEXT) then break end
+        Add(left, right)
+    end
+    scanTip:Hide()
+    return #out > 0 and out or nil
+end
+
+-- Reads one item's tooltip into Ledger.tips. When the item isn't loaded yet it
+-- asks the server once and tries again when the item arrives.
+function Ledger:ReadTooltip(id, final)
+    if self.tips[id] or tipFailed[id] then return self.tips[id] ~= nil end
+    if not final and C_Item and C_Item.IsItemDataCachedByID then           -- RETEST
+        if ns.SafeCall(C_Item.IsItemDataCachedByID, id) == false then
+            tipWanted[id] = true
+            self:QueueName(id, false, true)
+            return false
+        end
+    end
+    local lines = TooltipLines(id)
+    if not lines then
+        if final then tipFailed[id] = true return false end
+        tipWanted[id] = true
+        self:QueueName(id, false, true)
+        return false
+    end
+    tipWanted[id] = nil
+    self.tips[id] = table.concat(lines, "\n"):lower()
+    return true
+end
+
+function Ledger:TooltipArrived(id, ok)
+    if not tipWanted[id] then return end
+    tipWanted[id] = nil
+    if not ok then tipFailed[id] = true return end
+    if self:ReadTooltip(id, true) then
+        for _, idx in pairs(self.index) do
+            if idx.byId[id] then idx.version = idx.version + 1 end
+        end
+        if ML.searchActive then ML:RequestUIRefresh(0.5) end
+    end
+end
+
+-- Reads the tooltips of every item in a realm's index that doesn't have one yet
+function Ledger:EnsureTooltips(realmKey)
+    if not ML.db.settings.searchTooltips or ns.FindJob("tooltips") then return end
+    local idx = realmKey and self.index[realmKey]
+    if not idx or not idx.ready then return end
+    local ids = {}
+    for id in pairs(idx.byId) do
+        if not self.tips[id] and not tipWanted[id] and not tipFailed[id] then ids[#ids + 1] = id end
+    end
+    if #ids == 0 then return end
+    table.sort(ids)
+    local job = { name = "tooltips", label = "reading item tooltips", ids = ids, i = 1 }
+    function job:Step(deadline)
+        local list, n = self.ids, #self.ids
+        while self.i <= n do
+            Ledger:ReadTooltip(list[self.i])
+            self.i = self.i + 1
+            if self.i % 8 == 0 and ns.Clock() >= deadline then return false end
+        end
+        return true
+    end
+    function job:Progress() return self.i - 1, #self.ids end
+    function job:OnDone()
+        idx.version = idx.version + 1
+        ML:RequestUIRefresh()
+    end
+    ns.StartJob(job)
+end
+
+function Ledger:TooltipProgress()
+    local job = ns.FindJob("tooltips")
+    if job then return job:Progress() end
+    return nil
+end
+
+-- Search terms: words, or "a quoted phrase"; every term must match
+function Ledger.ParseSearch(text)
+    local terms = {}
+    text = ns.Trim(text or ""):lower()
+    text = text:gsub('"([^"]*)"', function(phrase)
+        phrase = ns.Trim(phrase)
+        if phrase ~= "" then terms[#terms + 1] = phrase end
+        return " "
+    end)
+    for word in text:gmatch("%S+") do
+        word = word:gsub('"', "")
+        if word ~= "" then terms[#terms + 1] = word end
+    end
+    return terms
+end
+
+-- True when every term is in the item's name, its type/subtype/slot, or
+-- (with useTips) its tooltip. A search that is just a number matches item IDs
+-- and names only, so "51" doesn't list every item with a 51 in its tooltip.
+function Ledger:Matches(e, terms, useTips)
+    if #terms == 1 and terms[1]:match("^%d+$") then
+        return e.id == tonumber(terms[1]) or (e.lname ~= nil and e.lname:find(terms[1], 1, true) ~= nil)
+    end
+    local tip = useTips and e.id and e.kind ~= "pet" and self.tips[e.id] or nil
+    for _, term in ipairs(terms) do
+        local found = (e.lname and e.lname:find(term, 1, true))
+            or (e.kinds and e.kinds:find(term, 1, true))
+            or (tip and tip:find(term, 1, true))
+        if not found then return false end
+    end
+    return true
 end
 
 -------------------------------------------------------------------------------
@@ -698,9 +878,17 @@ function Ledger:MakeEntry(key, s, e)
             end
         elseif e.id then
             local getInstant = (C_Item and C_Item.GetItemInfoInstant) or rawget(_G, "GetItemInfoInstant")   -- RETEST
-            local _, itemType, itemSubType, _, icon, classID = ns.SafeCall(getInstant, e.id)
+            local _, itemType, itemSubType, equipLoc, icon, classID = ns.SafeCall(getInstant, e.id)
             e.typeName, e.subName, e.icon, e.cls = Text(itemType), Text(itemSubType), icon, Num(classID)
+            equipLoc = Text(equipLoc)
+            e.slotName = equipLoc and Text(rawget(_G, equipLoc)) or nil   -- "INVTYPE_LEGS" -> "Legs"
         end
+        local words = {}
+        for _, w in ipairs({ e.typeName or "", e.subName or "", e.slotName or "" }) do
+            if w ~= "" then words[#words + 1] = w end
+        end
+        if e.kind == "pet" then words[#words + 1] = "Battle Pet" end
+        e.kinds = table.concat(words, "\n"):lower()
         self:FillNames(e)
     end
     e.m, e.ref7, e.count, e.first, e.last = m, ref7, count, first, last
