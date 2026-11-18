@@ -83,6 +83,7 @@ The search box looks at each item's name, its type and slot, and everything in i
 - Put a phrase in quotes to match it exactly: `"increased defense"`.
 - A number on its own finds the item with that item ID.
 - Capital letters don't matter.
+- Every new search starts with all item types open. You can close them while you search; when you clear the search, the item types you had closed before are closed again.
 
 Some searches to try: `sword`, `plate legs`, `binds when equipped`, `critical strike`, `"chance on hit"`, `strongholds`.
 

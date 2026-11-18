@@ -897,6 +897,9 @@ function ML:BuildEntries(realmKey, searchText)
     local searching = #terms > 0
     local useTips = s.searchTooltips
     self.searchActive = searching
+    -- searches keep their own open/closed state: every search starts with all
+    -- item types open, and closing one doesn't change the saved layout
+    if not searching then wipe(self.searchCollapsed) end
     local recentFrom = ns.Today() - 7
     local groups, total = {}, 0
     for _, e in pairs(idx.byKey) do
@@ -923,7 +926,7 @@ function ML:BuildEntries(realmKey, searchText)
     local entries = {}
     for _, gname in ipairs(names) do
         local list = groups[gname]
-        local collapsed = s.groupByType and self.db.collapsed[gname] and not searching
+        local collapsed = s.groupByType and self:CollapseState()[gname] or false
         if s.groupByType then
             entries[#entries + 1] = { header = true, name = gname, n = #list, collapsed = collapsed }
         end
@@ -935,16 +938,25 @@ function ML:BuildEntries(realmKey, searchText)
     return entries, total, idx.ready
 end
 
+ML.searchCollapsed = {}
+
+-- The open/closed state in use: the search's own while searching, otherwise the saved one
+function ML:CollapseState()
+    return self.searchActive and self.searchCollapsed or self.db.collapsed
+end
+
 function ML:ToggleGroup(name)
-    self.db.collapsed[name] = not self.db.collapsed[name] or nil
+    local state = self:CollapseState()
+    state[name] = not state[name] or nil
     self:RefreshLedger()
 end
 
 function ML:SetAllCollapsed(collapse)
     local idx = Ledger:GetIndex(Ledger:ShownRealm())
     if not idx then return end
-    if not collapse then wipe(self.db.collapsed) else
-        for _, e in pairs(idx.byKey) do self.db.collapsed[e.typeName or OTHER] = true end
+    local state = self:CollapseState()
+    if not collapse then wipe(state) else
+        for _, e in pairs(idx.byKey) do state[e.typeName or OTHER] = true end
     end
     self:RefreshLedger()
 end
