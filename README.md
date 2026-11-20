@@ -11,6 +11,8 @@ Auctionator only remembers the last 21 days of prices (by default). MendeLedger 
 - Search everything in an item's tooltip, not just its name: weapon and armor types, slots, stats, effects and set bonuses
 - Price graph with ranges from 24 hours to all time; hover any point to see its prices
 - A summary for the chosen range: latest price, change, lowest, highest and averages
+- Find items you can buy on the auction house for less than a vendor pays for them
+- Find gear worth more disenchanted than it costs on the auction house
 - Shift-click an item to link it in chat
 - Import the prices your other characters have scanned on other realms
 - Minimap button and an entry in the addon compartment
@@ -61,7 +63,7 @@ Good to know:
 
 **Left side**
 - Search box: finds items by name, item type and anything in their tooltip (see Searching below). With the search box selected, shift-click an item in your bags to search for it.
-- **Filter**: sort by name, latest price, 7-day change or days recorded; search item tooltips or only names and types; show only items seen in the last 7 days or with 2 or more days of prices; group by item type; expand or collapse all item types.
+- **Filter**: sort by name, latest price, 7-day change, vendor profit, disenchant profit or days recorded; search item tooltips or only names and types; show only items seen in the last 7 days or with 2 or more days of prices; group by item type; expand or collapse all item types.
 - The item list, grouped under item-type bars. Click a bar to open or close it.
 
 **Right side**
@@ -88,6 +90,29 @@ The search box looks at each item's name, its type and slot, and everything in i
 Some searches to try: `sword`, `plate legs`, `binds when equipped`, `critical strike`, `"chance on hit"`, `strongholds`.
 
 Tooltips are read in the background after you open the window, which takes a few seconds the first time in each session. To search names and item types only, turn off **Search item tooltips** in the **Filter** menu.
+
+## Vendor profit
+
+Choose **Vendor profit** under **Sort by** in the **Filter** menu to list items whose cheapest auction costs less than a vendor pays for them, the biggest profit first.
+
+- The amount on the right is the profit on one item: what a vendor pays, minus the lowest buyout in the latest scan. Green means profit; grey means you'd lose money.
+- Items vendors won't buy say "no vendor" and come last.
+- Hover an item to see its profit in the tooltip, whatever the list is sorted by.
+- The auction price is from the latest scan, so a cheap auction may already be gone. Check when the item was last recorded (in its tooltip, or the summary when you click it), and look at the auction house before you count on the profit.
+- The profit is per item; only the cheapest auction is known, so buying several may cost more each.
+
+## Disenchant profit
+
+Choose **Disenchant profit** under **Sort by** in the **Filter** menu to list gear that's worth more disenchanted than its cheapest auction, the biggest profit first.
+
+- The amount on the right is what the item is worth disenchanted, minus its lowest buyout in the latest scan.
+- "Worth disenchanted" is the average over many disenchants: for each material the item can give, the chance of getting it times how many you get on average times its latest auction price on the same realm. A single disenchant can give more or less.
+- What an item gives depends on its item level and quality, and for uncommon gear on whether it's armor or a weapon. The rules follow the published World of Warcraft: Forever disenchanting tables.
+- A `*` after the amount means some of the materials it can give have no auction price yet, so it's really worth a bit more.
+- "can't DE" means it can't be disenchanted (shirts, tabards, some wands, or any item whose tooltip says "Cannot be disenchanted"). "no prices" means none of its materials have an auction price yet; "no data" means its item level isn't in the disenchanting tables.
+- Hover an item to see its disenchant profit in the tooltip, whatever the list is sorted by.
+- You need enough Enchanting skill to disenchant an item; MendeLedger doesn't check your skill.
+- As with vendor profit, prices are from the latest scan, so check the auction house before you buy.
 
 ## Options tab
 

@@ -2,7 +2,7 @@
 ## Title: MendeLedger
 ## Notes: A GUI for seeing Auctionator price history.
 ## Author: MendeleevForever
-## Version: 0.2.3
+## Version: 0.2.5
 ## X-Curse-Project-ID: 1809703
 ## Category: Auction/Economy
 ## OptionalDeps: Auctionator
@@ -20,5 +20,6 @@ Libs\LibCompress\lib.xml
 
 Core.lua
 Codec.lua
+Disenchant.lua
 Ledger.lua
 UI.lua

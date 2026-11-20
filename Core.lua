@@ -23,7 +23,7 @@ local ML = {}
 ns.ML = ML
 _G.MendeLedger = ML
 
-ML.VERSION          = "0.2.3"
+ML.VERSION          = "0.2.5"
 ML.TESTED_INTERFACE = 16001                                   -- RETEST: the build this was written against
 ML.PREFIX           = "|cffe6b422MendeLedger:|r "
 
@@ -63,11 +63,14 @@ end
 
 -- pcall here only isolates Lua errors from optional APIs; it does not make a
 -- protected call safe, and nothing in MendeLedger makes protected calls.
+local function PassResults(ok, ...)
+    if ok then return ... end
+    return nil
+end
+
 function ns.SafeCall(fn, ...)
     if type(fn) ~= "function" then return nil end
-    local ok, a, b, c, d, e, f, g = pcall(fn, ...)
-    if ok then return a, b, c, d, e, f, g end
-    return nil
+    return PassResults(pcall(fn, ...))       -- every return value (C_Item.GetItemInfo has 17)
 end
 
 -------------------------------------------------------------------------------
@@ -119,6 +122,13 @@ function ns.Money(copper)
         return ("%s%d|rs"):format(SILVER, s)
     end
     return ("%s%d|rc"):format(COPPER, c)
+end
+
+-- The same without colours, for greyed-out amounts: "12g 50s"
+function ns.PlainMoney(copper)
+    copper = ns.Num(copper)
+    if not copper then return "—" end
+    return (ns.Money(copper):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""))
 end
 
 -- Graph axis labels: "1.5g", "50s", "40c"
@@ -222,7 +232,7 @@ ns.DEFAULTS = {
         range       = 30,         -- graph range in days, 0 = all
         showQty     = true,
         showBand    = true,
-        sort        = "name",     -- name | price | change | days
+        sort        = "name",     -- name | price | change | profit | deprofit | days
         groupByType = true,
         searchTooltips = true,    -- search item tooltips (stats, effects, set bonuses), not just names
         recentOnly  = false,

@@ -655,12 +655,153 @@ local function OnItemLoaded(itemID, success)
     if success == false then
         failed[itemID] = true
         Ledger:TooltipArrived(itemID, false)
+        Ledger:FactsArrived(itemID, false)
         return
     end
     if Ledger:ItemName(itemID) then
         Ledger:NameArrived(itemID)
     end
-    if wasForced then Ledger:TooltipArrived(itemID, true) end
+    if wasForced then
+        Ledger:TooltipArrived(itemID, true)
+        Ledger:FactsArrived(itemID, true)
+    end
+end
+
+-------------------------------------------------------------------------------
+-- Item facts for the profit sorts, read once the item is loaded and kept for
+-- the session: from C_Item.GetItemInfo the vendor price (value 11: what a
+-- merchant pays for one, 0 = can't be sold), quality and item level; from
+-- C_Item.GetItemInfoInstant the class, subclass and slot. Auctionator's
+-- AUCTIONATOR_VENDOR_PRICE_CACHE is not used: it holds what merchants charge
+-- (recorded for crafting costs), not what they pay.
+-------------------------------------------------------------------------------
+Ledger.facts = {}                 -- [itemID] = { sell, quality, itemLevel, classID, subclassID, equipLoc }
+local factsWanted = {}
+
+local function ReadFacts(id)
+    if not (C_Item and C_Item.GetItemInfo) then return nil end
+    local info = { ns.SafeCall(C_Item.GetItemInfo, id) }                    -- RETEST: sellPrice is value 11
+    if not Text(info[1]) then return nil end                              -- not loaded yet
+    local sell = Num(info[11]) or 0
+    local getInstant = (C_Item and C_Item.GetItemInfoInstant) or rawget(_G, "GetItemInfoInstant")
+    local inst = { ns.SafeCall(getInstant, id) }
+    return {
+        sell       = sell > 0 and floor(sell) or 0,
+        quality    = Num(info[3]),
+        itemLevel  = Num(info[4]),
+        equipLoc   = Text(inst[4]) or Text(info[9]) or "",
+        classID    = Num(inst[6]) or Num(info[12]),
+        subclassID = Num(inst[7]) or Num(info[13]),
+    }
+end
+
+-- The item's facts, or nil while it loads (it's requested once through the
+-- same throttled queue as names and tooltips)
+function Ledger:ItemFacts(id)
+    if type(id) ~= "number" then return nil end
+    local f = self.facts[id]
+    if f then return f end
+    f = ReadFacts(id)
+    if f then
+        self.facts[id] = f
+        return f
+    end
+    if not factsWanted[id] then
+        factsWanted[id] = true
+        self:QueueName(id, false, true)
+    end
+    return nil
+end
+
+function Ledger:FactsArrived(id, ok)
+    if not factsWanted[id] then return end
+    factsWanted[id] = nil
+    if not ok then return end
+    local f = ReadFacts(id)
+    if f then
+        self.facts[id] = f
+        local sort = ML.db.settings.sort
+        if sort == "profit" or sort == "deprofit" then ML:RequestUIRefresh(0.5) end
+    end
+end
+
+-- Copper a vendor pays for one of the item, 0 if it can't be sold, nil while unknown
+function Ledger:VendorPrice(id)
+    local f = self:ItemFacts(id)
+    return f and f.sell or nil
+end
+
+-- Profit on one item from buying it at its latest lowest buyout and selling it
+-- to a vendor. Returns profit (nil when unknown or the item can't be vendored)
+-- and the vendor price (0 = can't be sold, nil = not known yet).
+function Ledger:VendorProfit(e)
+    if not e or e.kind == "pet" or not e.id then return nil, nil end
+    local v = self:VendorPrice(e.id)
+    if not v or v <= 0 or not e.m or e.m <= 0 then return nil, v end
+    return v - e.m, v
+end
+
+-------------------------------------------------------------------------------
+-- Disenchant profit: the expected disenchant value (Disenchant.lua) minus the
+-- item's latest lowest buyout. Material prices are the materials' latest
+-- lowest buyouts in the same realm's ledger, so an imported realm uses its
+-- own prices.
+-------------------------------------------------------------------------------
+local DE = ns.Disenchant
+do
+    local classes = Enum and Enum.ItemClass                                -- RETEST
+    local armorSub, weaponSub = Enum and Enum.ItemArmorSubclass, Enum and Enum.ItemWeaponSubclass
+    DE.CLASS_WEAPON = (classes and Num(classes.Weapon)) or 2
+    DE.CLASS_ARMOR = (classes and Num(classes.Armor)) or 4
+    DE.BLOCKED_SUBCLASS = {
+        [DE.CLASS_ARMOR] = { [(armorSub and Num(armorSub.Cosmetic)) or 5] = true },
+        [DE.CLASS_WEAPON] = { [(weaponSub and Num(weaponSub.Fishingpole)) or 20] = true },
+    }
+end
+local NOT_DE_TEXT = Text(rawget(_G, "ITEM_DISENCHANT_NOT_DISENCHANTABLE"))  -- RETEST: "Cannot be disenchanted"
+NOT_DE_TEXT = NOT_DE_TEXT and NOT_DE_TEXT:lower()
+
+-- One unit of a material in a realm: its latest lowest buyout in the ledger.
+-- memo (optional) caches lookups for one pass over the list.
+function Ledger:MaterialPrice(realmKey, itemID, memo)
+    if memo and memo[itemID] ~= nil then return memo[itemID] or nil end
+    local key, price = tostring(itemID), nil
+    local idx = realmKey and self.index[realmKey]
+    local e = idx and idx.byKey[key]
+    if e then
+        price = e.m
+    else
+        local realm = realmKey and self:Realm(realmKey)
+        local s = realm and realm.items[key]
+        if s then price = Codec.Summary(s) end
+    end
+    if memo then memo[itemID] = price or false end
+    return price
+end
+
+-- Returns profit, value, state, partial, estimated
+--   state "ok"       value = expected disenchant value; profit = value - latest lowest buyout
+--         "loading"  the item's facts aren't known yet
+--         "noprice"  none of its materials has a price in this realm yet
+--         "nodata"   gear whose item level is outside the disenchant tables
+--         "cannot"   gear that can't be disenchanted (or its tooltip says so)
+--         nil        not uncommon, rare or epic armor or weapons
+--   partial: some possible material has no price, so the value is too low
+function Ledger:DisenchantProfit(realmKey, e, memo)
+    if not e or e.kind == "pet" or not e.id then return nil end
+    local f = self:ItemFacts(e.id)
+    if not f then return nil, nil, "loading" end
+    local itemLevel = (e.kind == "gear" and tonumber(e.ilvl)) or f.itemLevel
+    local tip = self.tips[e.id]
+    local refuses = NOT_DE_TEXT ~= nil and tip ~= nil and tip:find(NOT_DE_TEXT, 1, true) ~= nil
+    local result = DE.Evaluate({ id = e.id, quality = f.quality, itemLevel = itemLevel, classID = f.classID,
+                                 subclassID = f.subclassID, equipLoc = f.equipLoc }, refuses)
+    if not result then return nil end
+    if result.status ~= "ok" then return nil, nil, result.status end
+    local value, partial = DE.ExpectedValue(result.outcomes, function(id) return self:MaterialPrice(realmKey, id, memo) end)
+    if not value then return nil, nil, "noprice", partial, result.estimated end
+    if not e.m or e.m <= 0 then return nil, value, "ok", partial, result.estimated end
+    return value - e.m, value, "ok", partial, result.estimated
 end
 
 -------------------------------------------------------------------------------

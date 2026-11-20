@@ -435,6 +435,31 @@ local function AddItemTooltip(owner, e)
     GameTooltip:AddLine(" ")
     GameTooltip:AddDoubleLine("Latest price", ns.Coins(e.m), C.muted[1], C.muted[2], C.muted[3], 1, 1, 1)
     GameTooltip:AddDoubleLine("7-day change", Percent(e.change), C.muted[1], C.muted[2], C.muted[3], 1, 1, 1)
+    local profit, vendor = Ledger:VendorProfit(e)
+    if profit and profit > 0 then
+        GameTooltip:AddDoubleLine("Vendor profit", "|cff40ff40+|r" .. ns.Coins(profit), C.muted[1], C.muted[2], C.muted[3], 1, 1, 1)
+    elseif profit then
+        GameTooltip:AddDoubleLine("Vendor profit", GREY .. "none (vendor pays " .. ns.PlainMoney(vendor) .. ")|r", C.muted[1], C.muted[2], C.muted[3], 1, 1, 1)
+    elseif vendor == 0 then
+        GameTooltip:AddDoubleLine("Vendor profit", GREY .. "vendors won't buy it|r", C.muted[1], C.muted[2], C.muted[3], 1, 1, 1)
+    end
+    local m = C.muted
+    local deProfit, deValue, deState, partial, estimated = Ledger:DisenchantProfit(Ledger:ShownRealm(), e)
+    local note = (partial and " *" or "") .. (estimated and (GREY .. " (estimate)|r") or "")
+    if deProfit and deProfit > 0 then
+        GameTooltip:AddDoubleLine("Disenchant profit", "|cff40ff40+|r" .. ns.Coins(deProfit) .. note, m[1], m[2], m[3], 1, 1, 1)
+    elseif deProfit then
+        GameTooltip:AddDoubleLine("Disenchant profit", GREY .. "none (disenchants for about " .. ns.PlainMoney(deValue) .. ")|r" .. note, m[1], m[2], m[3], 1, 1, 1)
+    elseif deState == "cannot" then
+        GameTooltip:AddDoubleLine("Disenchant profit", GREY .. "can't be disenchanted|r", m[1], m[2], m[3], 1, 1, 1)
+    elseif deState == "noprice" then
+        GameTooltip:AddDoubleLine("Disenchant profit", GREY .. "its materials have no prices yet|r", m[1], m[2], m[3], 1, 1, 1)
+    elseif deState == "nodata" then
+        GameTooltip:AddDoubleLine("Disenchant profit", GREY .. "no disenchant data for its item level|r", m[1], m[2], m[3], 1, 1, 1)
+    end
+    if partial and deState == "ok" then
+        GameTooltip:AddLine("* some of its materials have no price yet, so the real value is higher", m[1], m[2], m[3], true)
+    end
     GameTooltip:AddDoubleLine("Recorded", ("%s day%s, %s – %s"):format(ns.Commas(e.count), e.count == 1 and "" or "s",
         ns.DayLabel(e.first), ns.DayLabel(e.last)), C.muted[1], C.muted[2], C.muted[3], 1, 1, 1)
     GameTooltip:Show()
@@ -870,6 +895,32 @@ function ML:FillItemRow(row, e)
     local sort = self.db.settings.sort
     if sort == "change" then
         row.value:SetText(Percent(e.change))
+    elseif sort == "profit" then
+        local p = e.profit
+        if p and p > 0 then
+            row.value:SetText("|cff40ff40+|r" .. ns.Money(p))
+        elseif p then
+            row.value:SetText(GREY .. (p < 0 and "-" or "") .. ns.PlainMoney(-p) .. "|r")
+        elseif e.vendorPrice == 0 then
+            row.value:SetText(GREY .. "no vendor|r")
+        else
+            row.value:SetText(GREY .. "—|r")
+        end
+    elseif sort == "deprofit" then
+        local p, star = e.deProfit, e.dePartial and "*" or ""
+        if p and p > 0 then
+            row.value:SetText("|cff40ff40+|r" .. ns.Money(p) .. star)
+        elseif p then
+            row.value:SetText(GREY .. (p < 0 and "-" or "") .. ns.PlainMoney(-p) .. star .. "|r")
+        elseif e.deState == "cannot" then
+            row.value:SetText(GREY .. "can't DE|r")
+        elseif e.deState == "noprice" then
+            row.value:SetText(GREY .. "no prices|r")
+        elseif e.deState == "nodata" then
+            row.value:SetText(GREY .. "no data|r")
+        else
+            row.value:SetText(GREY .. "—|r")
+        end
     elseif sort == "days" then
         row.value:SetText(Hex(C.text) .. ns.Commas(e.count) .. (e.count == 1 and " day" or " days") .. "|r")
     else
@@ -878,6 +929,8 @@ function ML:FillItemRow(row, e)
 end
 
 -- Flat list of type headers + items for the virtual list
+local DE_RANK = { ok = -1e15, noprice = -2e15, loading = -3e15, nodata = -4e15, cannot = -5e15, none = -math.huge }
+
 local SORTS = {
     name   = function(a, b) if a.sn ~= b.sn then return a.sn < b.sn end return a.key < b.key end,
     price  = function(a, b) if a.m ~= b.m then return a.m > b.m end return a.sn < b.sn end,
@@ -887,6 +940,20 @@ local SORTS = {
         return a.sn < b.sn
     end,
     days   = function(a, b) if a.count ~= b.count then return a.count > b.count end return a.sn < b.sn end,
+    -- most profit first; then items with no disenchant value yet; then gear with no data,
+    -- gear that can't be disenchanted, and everything that isn't gear
+    deprofit = function(a, b)
+        local x, y = a.deProfit or DE_RANK[a.deState or "none"], b.deProfit or DE_RANK[b.deState or "none"]
+        if x ~= y then return x > y end
+        return a.sn < b.sn
+    end,
+    -- most profit first; then items with no vendor price known yet; then items vendors won't buy
+    profit = function(a, b)
+        local x = a.profit or ((a.vendorPrice == 0) and -math.huge or -1e15)
+        local y = b.profit or ((b.vendorPrice == 0) and -math.huge or -1e15)
+        if x ~= y then return x > y end
+        return a.sn < b.sn
+    end,
 }
 
 function ML:BuildEntries(realmKey, searchText)
@@ -901,6 +968,7 @@ function ML:BuildEntries(realmKey, searchText)
     -- item types open, and closing one doesn't change the saved layout
     if not searching then wipe(self.searchCollapsed) end
     local recentFrom = ns.Today() - 7
+    local priceMemo = {}
     local groups, total = {}, 0
     for _, e in pairs(idx.byKey) do
         total = total + 1
@@ -909,6 +977,10 @@ function ML:BuildEntries(realmKey, searchText)
         if s.multiDay and (e.count or 0) < 2 then pass = false end
         if pass and searching then pass = Ledger:Matches(e, terms, useTips) end
         if pass then
+            if s.sort == "profit" then e.profit, e.vendorPrice = Ledger:VendorProfit(e) end
+            if s.sort == "deprofit" then
+                e.deProfit, e.deValue, e.deState, e.dePartial = Ledger:DisenchantProfit(realmKey, e, priceMemo)
+            end
             e.sn = e.lname or ("~" .. e.key)
             local gname = s.groupByType and (e.typeName or OTHER) or ""
             local g = groups[gname]
@@ -1025,6 +1097,8 @@ local FILTER_ITEMS = {
     { text = "Name", radio = "sort", value = "name" },
     { text = "Latest price", radio = "sort", value = "price" },
     { text = "7-day change", radio = "sort", value = "change" },
+    { text = "Vendor profit", radio = "sort", value = "profit" },
+    { text = "Disenchant profit", radio = "sort", value = "deprofit" },
     { text = "Days recorded", radio = "sort", value = "days" },
     { separator = true },
     { text = "Search item tooltips", setting = "searchTooltips" },
