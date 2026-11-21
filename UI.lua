@@ -581,7 +581,7 @@ end
 -- Tabs down the right edge
 -------------------------------------------------------------------------------
 local TAB_INFO = {
-    options = { title = "Options", body = "Recording, compression, how long to keep history, storage and realms" },
+    options = { title = "Options", body = "Recording, compression, how long to keep history, storage and auction houses" },
     ledger  = { title = "Ledger", body = "Search recorded items and graph their price history" },
 }
 
@@ -1059,7 +1059,7 @@ function ML:RefreshLedger(resetScroll)
         if not Ledger:AuctionatorPresent() then
             empty = "Auctionator isn't loaded.\n\nMendeLedger records the prices Auctionator scans. Enable Auctionator, then scan the auction house."
         else
-            empty = "Nothing recorded for this realm yet.\n\nOpen the auction house and let Auctionator scan. MendeLedger records a few seconds after you close it, or press Record Now on the Options tab."
+            empty = "Nothing recorded for this auction house yet.\n\nOpen the auction house and let Auctionator scan. MendeLedger records a few seconds after you close it, or press Record Now on the Options tab."
         end
     elseif not ready and #entries == 0 then
         empty = "Reading the ledger..."
@@ -1866,7 +1866,7 @@ end
 -------------------------------------------------------------------------------
 local OPT_LEFT_R, OPT_RIGHT_X = 430, 450
 local KEEP = { { 0, "Forever" }, { 730, "2 years" }, { 365, "1 year" }, { 180, "180 days" }, { 90, "90 days" } }
-local STORAGE = { "Realm", "Items", "Daily prices", "Stored", "As Lua tables", "Sealed blocks", "Saved by compression", "Scan detail" }
+local STORAGE = { "Auction house", "Items", "Daily prices", "Stored", "As Lua tables", "Sealed blocks", "Saved by compression", "Scan detail" }
 
 function ML:CreateOptionsView(f)
     local ov = CreateFrame("Frame", nil, f)
@@ -1897,11 +1897,11 @@ function ML:CreateOptionsView(f)
     local record = MenuButton(ov, "Record Now", 120)
     record:SetPoint("TOPLEFT", 20, -128)
     record:SetScript("OnClick", function() Ledger:RecordNow("button", false); ML:UpdateRecordingStatus() end)
-    AddHoverTip(record, "Record Now", "Copy Auctionator's prices for the realm you are on into the ledger right away.")
-    local import = MenuButton(ov, "Import Realms", 130)
+    AddHoverTip(record, "Record Now", "Copy Auctionator's prices for the auction house you use into the ledger right away.")
+    local import = MenuButton(ov, "Import All", 130)
     import:SetPoint("TOPLEFT", 148, -128)
     import:SetScript("OnClick", function() Ledger:ImportAll() end)
-    AddHoverTip(import, "Import Realms", "Record every realm Auctionator has prices for, including realms your other characters scanned. Safe to repeat: nothing is counted twice.")
+    AddHoverTip(import, "Import All", "Record everything Auctionator has prices for, including what your other characters scanned. Safe to repeat: nothing is counted twice.")
 
     ov.status1 = NoWrap(AddLabel(ov, "", "GameFontNormalSmall", C.text))
     ov.status1:SetPoint("TOPLEFT", 22, -160)
@@ -1986,24 +1986,24 @@ function ML:CreateOptionsView(f)
     end
 
     ---------------------------------------------------------------- Realms
-    AddSection(ov, "Realms", -206, OPT_RIGHT_X, -20)
+    AddSection(ov, "Auction Houses", -206, OPT_RIGHT_X, -20)
     local forget = FlatButton(ov, "Forget", 58, 18)
     forget:SetPoint("TOPRIGHT", -20, -202)
     forget:SetScript("OnClick", function() ML:ConfirmForget(Ledger:ShownRealm()) end)
-    AddHoverTip(forget, "Forget this realm", "Delete MendeLedger's history for the realm being shown. Auctionator's own data is not touched.")
+    AddHoverTip(forget, "Forget", "Delete MendeLedger's history for the auction house (or old realm) being shown. Auctionator's own data is not touched.")
     local useHere = FlatButton(ov, "Use Here", 66, 18)
     useHere:SetPoint("TOPRIGHT", -84, -202)
     useHere:SetScript("OnClick", function()
         local key = Ledger:ShownRealm()
         if key then Ledger:SetCharacterRealm(key) end
     end)
-    AddHoverTip(useHere, "This character plays here",
-        "Record this character's prices into the realm being shown. WoW Forever no longer tells addons which realm you're on, so MendeLedger remembers it for each character.")
-    local rhint = AddLabel(ov, "Click a realm to show it in the Ledger tab.", nil, C.muted)
+    AddHoverTip(useHere, "This character uses this auction house",
+        "Only needed if MendeLedger can't tell on its own (it reads your region, ruleset and faction). Records this character's prices into the entry being shown.")
+    local rhint = AddLabel(ov, "Region / ruleset / faction. Click one to show it in the Ledger tab.", nil, C.muted)
     rhint:SetPoint("TOPLEFT", OPT_RIGHT_X + 2, -230)
     local rscroll, rchild = MakeScroll("MendeLedgerRealmScroll", ov, RW - 24)
     rscroll:SetPoint("TOPLEFT", OPT_RIGHT_X, -248)
-    rscroll:SetPoint("BOTTOMRIGHT", ov, "TOPRIGHT", -44, -336)
+    rscroll:SetPoint("BOTTOMRIGHT", ov, "TOPRIGHT", -44, -320)
     ov.realmList = AttachVirtualList(rscroll, rchild, 22, function()
         local row = CreateFrame("Button", nil, rchild)
         row:SetSize(RW - 24, 22)
@@ -2031,20 +2031,22 @@ function ML:CreateOptionsView(f)
         StripeRow(row, idx)
         row.selBar:SetShown(r.key == Ledger:ShownRealm())
         row.name:SetText(r.name)
-        local mine = ML.charDB and ML.charDB.realm == r.key
-        row.info:SetText(("%s%s items  •  %s"):format(mine and "|cffffd100this character|r  •  " or "", ns.Commas(r.items), ns.Ago(r.lastRecord)))
+        local mine = ML.charDB and (ML.charDB.ah == r.key or (not ML.charDB.ah and ML.charDB.realm == r.key))
+        row.name:SetText(r.old and (r.name .. GREY .. "  (old realm)|r") or r.name)
+        row.info:SetText(("%s%s items  •  %s"):format(mine and "|cffffd100this character|r  •  " or
+            (r.merged and (GREY .. "history moved|r  •  ") or ""), ns.Commas(r.items), ns.Ago(r.lastRecord)))
     end)
     ov.realmEmpty = AddLabel(rchild, "", "GameFontNormalSmall", C.muted)
     ov.realmEmpty:SetPoint("TOPLEFT", 6, -6)
     ov.realmEmpty:SetWidth(RW - 40)
 
     ---------------------------------------------------------------- Client
-    AddSection(ov, "Client", -352, OPT_RIGHT_X, -20)
+    AddSection(ov, "Client", -336, OPT_RIGHT_X, -20)
     ov.probe = {}
-    for i = 1, 15 do
+    for i = 1, 16 do
         local b = CreateFrame("Button", nil, ov)
         b:SetSize(RW - 4, 14)
-        b:SetPoint("TOPLEFT", OPT_RIGHT_X + 2, -376 - (i - 1) * 15)
+        b:SetPoint("TOPLEFT", OPT_RIGHT_X + 2, -360 - (i - 1) * 15)
         b.text = NoWrap(AddLabel(b, "", "GameFontNormalSmall", C.text))
         b.text:SetAllPoints()
         b:SetScript("OnEnter", function(self)
@@ -2083,7 +2085,7 @@ function ML:UpdateRecordingStatus()
     local key = Ledger:ShownRealm()
     local realm = key and Ledger:Realm(key)
     ov.status2:SetText(realm and ("Last recorded %s for %s"):format(ns.Ago(realm.lastRecord), Ledger:RealmName(key))
-        or (Ledger:AuctionatorPresent() and "No realm recorded yet." or "Auctionator isn't loaded."))
+        or (Ledger:AuctionatorPresent() and "Nothing recorded yet." or "Auctionator isn't loaded."))
 end
 
 function ML:RefreshOptions()
@@ -2132,7 +2134,7 @@ function ML:RefreshOptions()
     -- realms
     local list = Ledger:RealmList()
     ov.realmList:SetData(list)
-    ov.realmEmpty:SetText(#list == 0 and "No realms recorded yet." or "")
+    ov.realmEmpty:SetText(#list == 0 and "No auction houses recorded yet." or "")
 
     -- client check
     local probe = ns.Probe()
@@ -2180,7 +2182,7 @@ function ML:SetKeepDays(days)
 end
 
 function ML:ConfirmForget(key)
-    if not key or not self.db.realms[key] then ns.Print("there is no recorded realm to forget.") return end
+    if not key or not self.db.realms[key] then ns.Print("there is nothing recorded to forget.") return end
     StaticPopup_Show("MENDELEDGER_FORGET", Ledger:RealmName(key), nil, key)      -- RETEST
 end
 

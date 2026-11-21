@@ -14,13 +14,14 @@ Auctionator only remembers the last 21 days of prices (by default). MendeLedger 
 - Find items you can buy on the auction house for less than a vendor pays for them
 - Find gear worth more disenchanted than it costs on the auction house
 - Shift-click an item to link it in chat
-- Import the prices your other characters have scanned on other realms
+- Keeps each auction house separate: region, ruleset and faction (for example US / PvE / Alliance)
+- Import the prices your other characters have scanned
 - Minimap button and an entry in the addon compartment
 
 ## Requirements
 
 - World of Warcraft: Forever
-- [Auctionator](https://www.curseforge.com/wow/addons/auctionator): MendeLedger records the prices Auctionator scans
+- [Auctionator](https://www.curseforge.com/wow/addons/auctionator): MendeLedger records the prices Auctionator scans. Version 350 or later is recommended: it keeps a separate price list for each ruleset and faction
 
 ## Installation
 
@@ -106,7 +107,7 @@ Choose **Vendor profit** under **Sort by** in the **Filter** menu to list items 
 Choose **Disenchant profit** under **Sort by** in the **Filter** menu to list gear that's worth more disenchanted than its cheapest auction, the biggest profit first.
 
 - The amount on the right is what the item is worth disenchanted, minus its lowest buyout in the latest scan.
-- "Worth disenchanted" is the average over many disenchants: for each material the item can give, the chance of getting it times how many you get on average times its latest auction price on the same realm. A single disenchant can give more or less.
+- "Worth disenchanted" is the average over many disenchants: for each material the item can give, the chance of getting it times how many you get on average times its latest auction price in the same auction house. A single disenchant can give more or less.
 - What an item gives depends on its item level and quality, and for uncommon gear on whether it's armor or a weapon. The rules follow the published World of Warcraft: Forever disenchanting tables.
 - A `*` after the amount means some of the materials it can give have no auction price yet, so it's really worth a bit more.
 - "can't DE" means it can't be disenchanted (shirts, tabards, some wands, or any item whose tooltip says "Cannot be disenchanted"). "no prices" means none of its materials have an auction price yet; "no data" means its item level isn't in the disenchanting tables.
@@ -118,13 +119,13 @@ Choose **Disenchant profit** under **Sort by** in the **Filter** menu to list ge
 
 Click the gear tab on the right edge of the window.
 
-- **Recording**: record automatically after auction house scans; **Record Now**; **Import Realms** records the prices Auctionator has saved for all your realms.
+- **Recording**: record automatically after auction house scans; **Record Now**; **Import All** records the prices Auctionator has saved.
 - **Scan Detail**: keep every Auctionator scan, and for how long (7, 14 or 30 days).
 - **Compression**: saves disk space. It's best to leave it on.
 - **Keep Daily History**: Forever, 2 years, 1 year, 180 days or 90 days.
 - **Display**: show the minimap button; print a line in chat after each recording.
 - **Storage**: how much space your history uses.
-- **Realms**: click a realm to view its prices; **Use Here** records the character you're playing into the realm being shown; **Forget** deletes a realm's history (Auctionator's own data is not touched).
+- **Auction Houses**: each one MendeLedger has prices for, shown as region / ruleset / faction. Click one to view its prices; **Forget** deletes its history (Auctionator's own data is not touched). **Use Here** is only needed if MendeLedger can't tell which auction house your character uses. Entries marked "old realm" hold prices from before version 0.2.7 (see Troubleshooting).
 - **Client**: shows which game features MendeLedger found. Useful when reporting a problem.
 
 ## Commands
@@ -134,10 +135,10 @@ Click the gear tab on the right edge of the window.
 | `/mendel` | open or close the window |
 | `/mendel <text>` | open the window and search (names, types, stats, effects or an item ID) |
 | `/mendel record` | record Auctionator's prices now |
-| `/mendel import` | record every realm Auctionator has prices for |
-| `/mendel realms` | list the realms in your history |
-| `/mendel realm <name>` | show another realm's prices |
-| `/mendel thisrealm <name>` | tell MendeLedger which realm this character plays on |
+| `/mendel import` | record everything Auctionator has prices for |
+| `/mendel realms` | list the auction houses in your history |
+| `/mendel realm <name>` | show another auction house's prices |
+| `/mendel thisrealm <name>` | tell MendeLedger which auction house this character uses (only if it can't tell) |
 | `/mendel keep <days or forever>` | how long to keep daily prices |
 | `/mendel scans on` / `off` | keep every Auctionator scan, or only daily prices |
 | `/mendel keepscans <7, 14 or 30>` | how many days of scan detail to keep |
@@ -148,14 +149,14 @@ Click the gear tab on the right edge of the window.
 | `/mendel options` | open the Options tab |
 | `/mendel reset` | move the window back to the middle of the screen |
 | `/mendel probe` | check which game features MendeLedger found |
-| `/mendel forget` | forget the history of the realm being shown (asks first) |
+| `/mendel forget` | forget the history of the auction house being shown (asks first) |
 | `/mendel help` | list these commands in game |
 
 ## Disk space
 
-MendeLedger stores prices compactly. On a realm with about 7,000 items, the first 12 days of daily prices take roughly 0.35 MB.
+MendeLedger stores prices compactly. For an auction house with about 7,000 items, the first 12 days of daily prices take roughly 0.35 MB.
 
-Scan detail takes more. Scanning every 30 minutes all day can add about half a megabyte a day on a busy realm, which is why it's only kept for 14 days by default. If your saved data grows too large, choose a shorter **Keep Daily History** or **Scan Detail** setting.
+Scan detail takes more. Scanning every 30 minutes all day can add about half a megabyte a day for a busy auction house, which is why it's only kept for 14 days by default. If your saved data grows too large, choose a shorter **Keep Daily History** or **Scan Detail** setting.
 
 ## Troubleshooting
 
@@ -167,9 +168,15 @@ Scan detail takes more. Scanning every 30 minutes all day can add about half a m
 
 **"No scans of this item in this range."** Scan detail only exists for scans made while MendeLedger was enabled. The daily view is shown instead.
 
-**MendeLedger asks which realm you're on.** Since the WoW Forever update of November 20, 2026, the game no longer tells addons which realm you're on. MendeLedger remembers each character's realm. If it has prices for only one realm, it uses that one automatically. Otherwise, the first time it meets a character it asks once: open the **Options** tab, click your realm in the **Realms** list and press **Use Here**, or type `/mendel thisrealm <realm name>`. For a realm MendeLedger has never seen, type `/mendel thisrealm` followed by any name you like. Nothing is lost while it waits: Auctionator keeps its last 21 days of prices, and MendeLedger catches up as soon as it knows the realm.
+**How MendeLedger keeps auction houses apart.** WoW Forever has an auction house for each region (US, EU or Other), ruleset (PvE, PvP, RP, RP-PvP or Hardcore) and faction. MendeLedger reads these for each character and keeps a separate price history for each auction house, shown as, for example, US / PvE / Alliance. It matches Auctionator's own price lists one to one.
 
-**I play characters on more than one realm.** Since that same update, Auctionator can't tell realms apart either. Unless your version of Auctionator has been updated for this, it keeps a single price list for all your realms. MendeLedger still files each character's prices under that character's realm, but the prices themselves come from Auctionator.
+**An entry marked "old realm" on the Options tab.** Versions before 0.2.7 filed prices under a realm name such as CAMWOW US1 Realm 3 PvE. The first time one of your characters logs in, that history is moved into the auction house with the same region and ruleset, and chat says so. The old entry stays (marked "history moved") so a character of the other faction gets a copy too; once all your characters have logged in, you can **Forget** it.
+
+**I play both factions, or more than one ruleset.** Auctionator 350 and later keep a separate price list for each ruleset and faction, and MendeLedger copies each one into the right auction house. Older Auctionator versions keep a single price list for everything since the WoW Forever update of November 20, 2026. With those, so that one auction house's prices never end up in another's history, MendeLedger records daily prices from its own scans for each auction house instead of copying Auctionator's list, and chat says so once. Updating Auctionator fixes this.
+
+**An item shows up twice, once with a suffix.** Items with random enchantments, such as "of the Bear" or "of the Eagle", are listed separately for each suffix (Auctionator 350 and later record them that way), as well as once without a suffix for all of them together.
+
+**MendeLedger asks which auction house you use.** This only happens if the game won't say (for example on a client without these functions). Open the **Options** tab, click the right entry under **Auction Houses** and press **Use Here**, or type `/mendel thisrealm <name>`. Nothing is lost while it waits: Auctionator keeps its last 21 days of prices.
 
 **The minimap button is gone.** Type `/mendel minimap`.
 

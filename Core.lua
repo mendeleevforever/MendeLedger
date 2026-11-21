@@ -10,11 +10,12 @@ local addonName, ns = ...
 -- out-of-combat queue, the background job runner, the capability probe and
 -- the /mendel command.
 --
--- MendeLedger reads no unit data at all (no UnitHealth, UnitName, UnitExists
--- or similar) and never touches the combat log or secure snippets. Values that
--- come from game APIs (item names, realm names, links, build info) still go
--- through ns.Text / ns.Num, which drop Midnight "secret" values before
--- anything compares, prints or does arithmetic with them.
+-- The only unit data MendeLedger reads is UnitFactionGroup("player"), to know
+-- which auction house the character uses (Ledger.lua); it never reads health,
+-- power or names, the combat log or secure snippets. That value and every other
+-- value from game APIs (item names, links, build info) go through ns.Text /
+-- ns.Num, which drop Midnight "secret" values before anything compares,
+-- prints or does arithmetic with them.
 --
 -- Lines marked RETEST depend on the client build; check them when the
 -- interface number moves off 16001.
@@ -23,7 +24,7 @@ local ML = {}
 ns.ML = ML
 _G.MendeLedger = ML
 
-ML.VERSION          = "0.2.6"
+ML.VERSION          = "0.2.8"
 ML.TESTED_INTERFACE = 16001                                   -- RETEST: the build this was written against
 ML.PREFIX           = "|cffe6b422MendeLedger:|r "
 
@@ -244,7 +245,8 @@ ns.DEFAULTS = {
     positions   = {},
     names       = {},             -- [itemID or "p:species"] = quality digit .. name
     namesLocale = "",
-    realms      = {},             -- [Auctionator realm key] = { items = { [key] = packed }, ... }
+    realms      = {},             -- [auction house key, e.g. "US-PvE-Alliance", or an old realm key] = { items = ..., ... }
+    houses      = {},             -- [auction house key] = { seen, aKey = Auctionator's list now, aKeys = every list it used }
 }
 
 local function Copy(v)
@@ -302,6 +304,14 @@ function ML:InitDB()
     for k, v in pairs(db.names) do
         if type(v) ~= "string" then db.names[k] = nil end
     end
+    for k, h in pairs(db.houses) do
+        if type(k) ~= "string" or type(h) ~= "table" then db.houses[k] = nil
+        else
+            if h.aKey ~= nil and type(h.aKey) ~= "string" then h.aKey = nil end
+            if type(h.aKeys) ~= "table" then h.aKeys = {} end
+            if h.aKey then h.aKeys[h.aKey] = true end      -- 0.2.7 kept only the latest
+        end
+    end
     -- item names are cached in the client's language; start over if it changed
     local locale = GetLocale and ns.Text(GetLocale()) or ""
     if db.namesLocale ~= locale then
@@ -316,6 +326,7 @@ function ML:InitDB()
     if type(MendeLedgerCharDB) ~= "table" then MendeLedgerCharDB = {} end
     local char = MendeLedgerCharDB
     if char.realm ~= nil and (type(char.realm) ~= "string" or char.realm == "") then char.realm = nil end
+    if char.ah ~= nil and (type(char.ah) ~= "string" or char.ah == "") then char.ah = nil end
     self.charDB = char
 end
 
@@ -485,10 +496,10 @@ local HELP = {
     { "/mendel", "open / close the window" },
     { "/mendel <text>", "open the window and search (names, types, stats, effects, set bonuses or an item ID)" },
     { "/mendel record", "record Auctionator's prices now" },
-    { "/mendel import", "record every realm Auctionator has prices for" },
-    { "/mendel realms", "list the realms in the ledger" },
-    { "/mendel realm <name>", "show another realm's history" },
-    { "/mendel thisrealm <name>", "the realm this character plays on (the game no longer tells addons)" },
+    { "/mendel import", "record everything Auctionator has prices for" },
+    { "/mendel realms", "list the auction houses in the ledger (and realms from before 0.2.7)" },
+    { "/mendel realm <name>", "show another auction house's history" },
+    { "/mendel thisrealm <name>", "which auction house this character uses (only if MendeLedger can't tell)" },
     { "/mendel keep <days | forever>", "how long to keep history (e.g. /mendel keep 365)" },
     { "/mendel compress on | off", "compress sealed history (when it saves 10% or more)" },
     { "/mendel scans on | off", "keep every Auctionator scan, for prices by time of day" },
@@ -499,7 +510,7 @@ local HELP = {
     { "/mendel options", "open the Options tab" },
     { "/mendel reset", "move the window back to the middle of the screen" },
     { "/mendel probe", "check which game features this client provides" },
-    { "/mendel forget", "forget the history of the realm being shown (asks first)" },
+    { "/mendel forget", "forget the history of the auction house being shown (asks first)" },
 }
 
 function ML:PrintHelp()
@@ -569,23 +580,24 @@ end
 commands.realms = function()
     local list = ns.Ledger:RealmList()
     if #list == 0 then ns.Print("the ledger is empty. Scan the auction house with Auctionator first.") return end
-    ns.Print("realms in the ledger:")
+    ns.Print("auction houses in the ledger:")
     for _, r in ipairs(list) do
-        print(("  |cffffd100%s|r  %s items, last recorded %s"):format(r.name, ns.Commas(r.items), ns.Ago(r.lastRecord)))
+        print(("  |cffffd100%s|r%s  %s items, last recorded %s"):format(r.name,
+            r.old and (r.merged and "  (old realm, history moved)" or "  (old realm)") or "", ns.Commas(r.items), ns.Ago(r.lastRecord)))
     end
 end
 commands.thisrealm = function(rest)
     if rest == "" then
         local key = ns.Ledger:CurrentRealmKey()
-        ns.Print(key and ("this character's prices are recorded into %s. To change it: /mendel thisrealm <realm name>."):format(ns.Ledger:RealmName(key))
-            or "MendeLedger doesn't know this character's realm yet. Type /mendel thisrealm <realm name>; /mendel realms lists the ones it has.")
+        ns.Print(key and ("this character's prices are recorded into %s."):format(ns.Ledger:RealmName(key))
+            or "MendeLedger can't tell which auction house this character uses. Type /mendel thisrealm <name>; /mendel realms lists the ones it has.")
         return
     end
     ns.Ledger:SetCharacterRealm(rest)
 end
 commands.realm = function(rest)
     local key = ns.Ledger:FindRealm(rest)
-    if not key then ns.Print("no realm in the ledger matches \"" .. rest .. "\". Try /mendel realms.") return end
+    if not key then ns.Print("nothing in the ledger matches \"" .. rest .. "\". Try /mendel realms.") return end
     ML:ShowRealm(key)
     ML:Open("ledger")
 end
