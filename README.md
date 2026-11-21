@@ -124,7 +124,7 @@ Click the gear tab on the right edge of the window.
 - **Keep Daily History**: Forever, 2 years, 1 year, 180 days or 90 days.
 - **Display**: show the minimap button; print a line in chat after each recording.
 - **Storage**: how much space your history uses.
-- **Realms**: click a realm to view its prices, or **Forget** a realm's history (Auctionator's own data is not touched).
+- **Realms**: click a realm to view its prices; **Use Here** records the character you're playing into the realm being shown; **Forget** deletes a realm's history (Auctionator's own data is not touched).
 - **Client**: shows which game features MendeLedger found. Useful when reporting a problem.
 
 ## Commands
@@ -137,6 +137,7 @@ Click the gear tab on the right edge of the window.
 | `/mendel import` | record every realm Auctionator has prices for |
 | `/mendel realms` | list the realms in your history |
 | `/mendel realm <name>` | show another realm's prices |
+| `/mendel thisrealm <name>` | tell MendeLedger which realm this character plays on |
 | `/mendel keep <days or forever>` | how long to keep daily prices |
 | `/mendel scans on` / `off` | keep every Auctionator scan, or only daily prices |
 | `/mendel keepscans <7, 14 or 30>` | how many days of scan detail to keep |
@@ -165,6 +166,10 @@ Scan detail takes more. Scanning every 30 minutes all day can add about half a m
 **A search misses items right after opening the window.** Tooltips are still being read; the line under the title shows the progress, and the results fill in as it finishes.
 
 **"No scans of this item in this range."** Scan detail only exists for scans made while MendeLedger was enabled. The daily view is shown instead.
+
+**MendeLedger asks which realm you're on.** Since the WoW Forever update of November 20, 2026, the game no longer tells addons which realm you're on. MendeLedger remembers each character's realm. If it has prices for only one realm, it uses that one automatically. Otherwise, the first time it meets a character it asks once: open the **Options** tab, click your realm in the **Realms** list and press **Use Here**, or type `/mendel thisrealm <realm name>`. For a realm MendeLedger has never seen, type `/mendel thisrealm` followed by any name you like. Nothing is lost while it waits: Auctionator keeps its last 21 days of prices, and MendeLedger catches up as soon as it knows the realm.
+
+**I play characters on more than one realm.** Since that same update, Auctionator can't tell realms apart either. Unless your version of Auctionator has been updated for this, it keeps a single price list for all your realms. MendeLedger still files each character's prices under that character's realm, but the prices themselves come from Auctionator.
 
 **The minimap button is gone.** Type `/mendel minimap`.
 

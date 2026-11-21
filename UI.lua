@@ -1991,11 +1991,19 @@ function ML:CreateOptionsView(f)
     forget:SetPoint("TOPRIGHT", -20, -202)
     forget:SetScript("OnClick", function() ML:ConfirmForget(Ledger:ShownRealm()) end)
     AddHoverTip(forget, "Forget this realm", "Delete MendeLedger's history for the realm being shown. Auctionator's own data is not touched.")
+    local useHere = FlatButton(ov, "Use Here", 66, 18)
+    useHere:SetPoint("TOPRIGHT", -84, -202)
+    useHere:SetScript("OnClick", function()
+        local key = Ledger:ShownRealm()
+        if key then Ledger:SetCharacterRealm(key) end
+    end)
+    AddHoverTip(useHere, "This character plays here",
+        "Record this character's prices into the realm being shown. WoW Forever no longer tells addons which realm you're on, so MendeLedger remembers it for each character.")
     local rhint = AddLabel(ov, "Click a realm to show it in the Ledger tab.", nil, C.muted)
     rhint:SetPoint("TOPLEFT", OPT_RIGHT_X + 2, -230)
     local rscroll, rchild = MakeScroll("MendeLedgerRealmScroll", ov, RW - 24)
     rscroll:SetPoint("TOPLEFT", OPT_RIGHT_X, -248)
-    rscroll:SetPoint("BOTTOMRIGHT", ov, "TOPRIGHT", -44, -358)
+    rscroll:SetPoint("BOTTOMRIGHT", ov, "TOPRIGHT", -44, -336)
     ov.realmList = AttachVirtualList(rscroll, rchild, 22, function()
         local row = CreateFrame("Button", nil, rchild)
         row:SetSize(RW - 24, 22)
@@ -2019,22 +2027,24 @@ function ML:CreateOptionsView(f)
         end)
         return row
     end, function(row, r, idx)
+        row.item = r                                  -- the click handler needs to know the realm
         StripeRow(row, idx)
         row.selBar:SetShown(r.key == Ledger:ShownRealm())
         row.name:SetText(r.name)
-        row.info:SetText(("%s items  •  %s"):format(ns.Commas(r.items), ns.Ago(r.lastRecord)))
+        local mine = ML.charDB and ML.charDB.realm == r.key
+        row.info:SetText(("%s%s items  •  %s"):format(mine and "|cffffd100this character|r  •  " or "", ns.Commas(r.items), ns.Ago(r.lastRecord)))
     end)
     ov.realmEmpty = AddLabel(rchild, "", "GameFontNormalSmall", C.muted)
     ov.realmEmpty:SetPoint("TOPLEFT", 6, -6)
     ov.realmEmpty:SetWidth(RW - 40)
 
     ---------------------------------------------------------------- Client
-    AddSection(ov, "Client", -376, OPT_RIGHT_X, -20)
+    AddSection(ov, "Client", -352, OPT_RIGHT_X, -20)
     ov.probe = {}
-    for i = 1, 14 do
+    for i = 1, 15 do
         local b = CreateFrame("Button", nil, ov)
         b:SetSize(RW - 4, 14)
-        b:SetPoint("TOPLEFT", OPT_RIGHT_X + 2, -400 - (i - 1) * 15)
+        b:SetPoint("TOPLEFT", OPT_RIGHT_X + 2, -376 - (i - 1) * 15)
         b.text = NoWrap(AddLabel(b, "", "GameFontNormalSmall", C.text))
         b.text:SetAllPoints()
         b:SetScript("OnEnter", function(self)

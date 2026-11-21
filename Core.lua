@@ -23,7 +23,7 @@ local ML = {}
 ns.ML = ML
 _G.MendeLedger = ML
 
-ML.VERSION          = "0.2.5"
+ML.VERSION          = "0.2.6"
 ML.TESTED_INTERFACE = 16001                                   -- RETEST: the build this was written against
 ML.PREFIX           = "|cffe6b422MendeLedger:|r "
 
@@ -309,6 +309,14 @@ function ML:InitDB()
         db.namesLocale = locale
     end
     self.db = db
+
+    -- per character: the realm this character's prices are filed under. The
+    -- game keeps this file in the character's realm folder, so it stays right
+    -- even though WoW Forever no longer tells addons the realm.
+    if type(MendeLedgerCharDB) ~= "table" then MendeLedgerCharDB = {} end
+    local char = MendeLedgerCharDB
+    if char.realm ~= nil and (type(char.realm) ~= "string" or char.realm == "") then char.realm = nil end
+    self.charDB = char
 end
 
 -------------------------------------------------------------------------------
@@ -480,6 +488,7 @@ local HELP = {
     { "/mendel import", "record every realm Auctionator has prices for" },
     { "/mendel realms", "list the realms in the ledger" },
     { "/mendel realm <name>", "show another realm's history" },
+    { "/mendel thisrealm <name>", "the realm this character plays on (the game no longer tells addons)" },
     { "/mendel keep <days | forever>", "how long to keep history (e.g. /mendel keep 365)" },
     { "/mendel compress on | off", "compress sealed history (when it saves 10% or more)" },
     { "/mendel scans on | off", "keep every Auctionator scan, for prices by time of day" },
@@ -564,6 +573,15 @@ commands.realms = function()
     for _, r in ipairs(list) do
         print(("  |cffffd100%s|r  %s items, last recorded %s"):format(r.name, ns.Commas(r.items), ns.Ago(r.lastRecord)))
     end
+end
+commands.thisrealm = function(rest)
+    if rest == "" then
+        local key = ns.Ledger:CurrentRealmKey()
+        ns.Print(key and ("this character's prices are recorded into %s. To change it: /mendel thisrealm <realm name>."):format(ns.Ledger:RealmName(key))
+            or "MendeLedger doesn't know this character's realm yet. Type /mendel thisrealm <realm name>; /mendel realms lists the ones it has.")
+        return
+    end
+    ns.Ledger:SetCharacterRealm(rest)
 end
 commands.realm = function(rest)
     local key = ns.Ledger:FindRealm(rest)

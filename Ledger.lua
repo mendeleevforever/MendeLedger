@@ -82,7 +82,10 @@ end
 
 -- The key Auctionator files the current realm under (its connected-realm
 -- root), so both ledgers line up and imports map one to one.
-function Ledger:CurrentRealmKey()
+-- What the game (through Auctionator) says the realm is, or nil when it
+-- won't say. Since the WoW Forever hotfix of 2026-11-20, realm names and IDs
+-- come back empty ("" and 0) on purpose, so on Forever this is nil.
+function Ledger:GameRealmKey()
     local Au = A()
     if type(Au) == "table" then
         if type(Au.State) == "table" and Text(Au.State.CurrentRealm) then return Au.State.CurrentRealm end   -- RETEST
@@ -100,7 +103,72 @@ function Ledger:CurrentRealmKey()
         table.sort(copy)
         if copy[1] then return copy[1] end
     end
-    return Text(GetNormalizedRealmName and ns.SafeCall(GetNormalizedRealmName))
+    return Text(GetNormalizedRealmName and ns.SafeCall(GetNormalizedRealmName))   -- RETEST: "" on Forever since 2026-11-20
+end
+
+-- The realm this character's prices are filed under. In order:
+--   1. the game's own answer, which is also remembered for this character
+--   2. the realm remembered for this character (MendeLedgerCharDB, a
+--      per-character saved variable: the game files it in the character's
+--      realm folder, so it stays right even though addons can't see the realm)
+--   3. the only realm in the ledger, when there is just one
+--   4. nil: MendeLedger asks the player once (/mendel thisrealm, or Use Here
+--      on the Options tab) and records nothing until then. Nothing is lost:
+--      Auctionator keeps its last 21 days.
+-- self.realmSource says which: "game", "remembered", "only" or "unknown".
+function Ledger:CurrentRealmKey()
+    local char = ML.charDB
+    local key = self:GameRealmKey()
+    if key then
+        if char then char.realm = key end
+        self.realmSource = "game"
+        return key
+    end
+    if char and Text(char.realm) then
+        self.realmSource = "remembered"
+        return char.realm
+    end
+    local only, count = nil, 0
+    for k in pairs(ML.db.realms) do count = count + 1; only = k end
+    if count == 1 then
+        if char then char.realm = only end
+        self.realmSource = "only"
+        if not self.onlyNoticed then
+            self.onlyNoticed = true
+            ns.Print(("the game no longer tells addons which realm you're on, so this character is recorded into %s, the only realm MendeLedger has. If that's wrong, type /mendel thisrealm <your realm>."):format(self:RealmName(only)))
+        end
+        return only
+    end
+    self.realmSource = "unknown"
+    return nil
+end
+
+function Ledger:RealmUnknownNotice()
+    if self.unknownNoticed then return end
+    self.unknownNoticed = true
+    ns.Print("the game no longer tells addons which realm you're on, and MendeLedger hasn't recorded this character before, so it doesn't know where to file its prices. "
+        .. "Open the Options tab, click your realm and press |cffffd100Use Here|r, or type |cffffd100/mendel thisrealm <realm name>|r. Nothing is lost meanwhile: Auctionator keeps its last 21 days.")
+end
+
+-- /mendel thisrealm <name> and the Use Here button: file this character's
+-- prices under an existing realm (by key or name) or start a new one
+function Ledger:SetCharacterRealm(text)
+    text = ns.Trim(text or "")
+    if text == "" then return nil end
+    local key = self:FindRealm(text)
+    local created = false
+    if not key then
+        key = text
+        local realm = self:Realm(key, true)
+        realm.name = text
+        created = true
+    end
+    if ML.charDB then ML.charDB.realm = key end
+    self.unknownNoticed, self.onlyNoticed = nil, true
+    ns.Print(("this character's prices are now recorded into %s%s."):format(self:RealmName(key), created and " (a new realm)" or ""))
+    ML:ShowRealm(key)
+    self:RecordNow("realm chosen", true)
+    return key
 end
 
 function Ledger:DecodeCBOR(s)
@@ -130,8 +198,11 @@ function Ledger:LiveSource()
     end
     local root = rawget(_G, "AUCTIONATOR_PRICE_DATABASE")
     if type(root) ~= "table" then return nil, key, "Auctionator isn't loaded, so there is nothing new to record." end
-    if not key then return nil, nil, "The realm isn't known yet; try again in a moment." end
-    local v = root[key]
+    if not key then return nil, nil, "MendeLedger doesn't know which realm this character is on yet. Use /mendel thisrealm <realm name>." end
+    local aKey = (type(Au) == "table" and type(Au.State) == "table" and type(Au.State.CurrentRealm) == "string")
+        and Au.State.CurrentRealm or key              -- Auctionator's own key, "" since the realm is hidden
+    local v = root[aKey]
+    if v == nil then v = root[key] end
     if type(v) == "table" then return v, key end
     if type(v) == "string" then
         local t = self:DecodeCBOR(v)
@@ -149,8 +220,15 @@ function Ledger:SourceProbe(Add)
         local v = Num(root.__dbversion)
         Add("Price database format", v == 8, ("version %s (written for 8)"):format(tostring(v or "?")))   -- RETEST
     end
-    local src, key, err = self:LiveSource()
-    Add("Realm prices", src ~= nil, src and ("realm key " .. tostring(key)) or err)
+    local key = self:CurrentRealmKey()
+    local where = ({
+        game = "from the game",
+        remembered = "remembered for this character (the game hides realm names since the 2026-11-20 hotfix)",
+        only = "the only realm in the ledger (the game hides realm names since the 2026-11-20 hotfix)",
+    })[self.realmSource or ""]
+    Add("Realm", key ~= nil, key and (key .. ", " .. where) or "unknown: the game hides realm names; use /mendel thisrealm <realm name>")
+    local src, _, err = self:LiveSource()
+    Add("Realm prices", src ~= nil, src and "Auctionator's prices for this session" or err)
     Add("Scan detail", self.scanHook,
         self.scanHook and "hooked into Auctionator.Database:ProcessScan" or "Auctionator's scan processing wasn't found, so only daily prices are recorded")
     Add("Day numbering", true, ("today is day %d (%s)"):format(ns.Today(), ns.DayDate(ns.Today())))
@@ -160,6 +238,7 @@ end
 -- Realms in the ledger
 -------------------------------------------------------------------------------
 function Ledger:Realm(key, create)
+    if type(key) ~= "string" or key == "" then return nil end
     local realms = ML.db.realms
     local r = realms[key]
     if not r and create then
@@ -272,6 +351,12 @@ end
 
 function Ledger:RecordNow(reason, silent)
     local src, key, err = self:LiveSource()
+    if src and not key then
+        self.status = "Not recording: MendeLedger doesn't know which realm this character is on."
+        self:RealmUnknownNotice()
+        ML:RequestUIRefresh()
+        return false
+    end
     if not src then
         self.status = err
         if not silent then ns.Print(err) end
@@ -287,8 +372,13 @@ function Ledger:ImportAll()
     local root = rawget(_G, "AUCTIONATOR_PRICE_DATABASE")
     if type(root) ~= "table" then ns.Print("Auctionator isn't loaded, so there is nothing to import.") return end
     local liveSrc, liveKey = self:LiveSource()
-    local n, failed = 0, 0
+    local n, failed, skipped = 0, 0, 0
     for key, v in pairs(root) do
+        -- since realm names are hidden, Auctionator files new prices under "":
+        -- those belong to this character's realm (skipped while it's unknown)
+        if key == "" then
+            if liveKey then key = liveKey else skipped = skipped + 1; key = nil end
+        end
         if type(key) == "string" and key ~= "__dbversion" then
             local src
             if key == liveKey and liveSrc then src = liveSrc
@@ -302,7 +392,11 @@ function Ledger:ImportAll()
             end
         end
     end
-    if n == 0 and failed == 0 then ns.Print("Auctionator has no prices saved yet.") return end
+    if skipped > 0 then self:RealmUnknownNotice() end
+    if n == 0 and failed == 0 then
+        if skipped == 0 then ns.Print("Auctionator has no prices saved yet.") end
+        return
+    end
     ns.Print(("importing %d realm%s from Auctionator%s."):format(n, n == 1 and "" or "s",
         failed > 0 and (" (%d couldn't be unpacked on this client)"):format(failed) or ""))
 end
@@ -1145,7 +1239,7 @@ function Ledger:OnScan(info)
     lastInfo = info
     if not ML.db or not ML.db.settings.recordScans then return end
     local key = self:CurrentRealmKey()
-    if not key then return end
+    if not key then self:RealmUnknownNotice() return end
     self.scanQueue[#self.scanQueue + 1] = { info = info, t = time(), key = key }
     if not self.scanJob then self:NextScan() end
     self:ScheduleRecord(20, "scan", true)     -- keeps the daily ledger current while the AH stays open
