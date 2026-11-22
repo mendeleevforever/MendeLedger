@@ -232,14 +232,7 @@ function Ledger:NoteAuctionHouse(key, previous)
         local pr, prs, pf = previous:match("^(%a+)%-(%a+)%-(%a+)$")
         local r, rs, f = key:match("^(%a+)%-(%a+)%-(%a+)$")
         local old = ML.db.realms[previous]
-        if pr == r and pf == f and prs ~= rs and not (type(old.mergedInto) == "table" and old.mergedInto[key]) then
-            if type(old.mergedInto) ~= "table" then old.mergedInto = {} end
-            local tag = previous .. ">" .. key
-            if not self.migrating[tag] then
-                self.migrating[tag] = true
-                self:StartMerge(previous, key)
-            end
-        end
+        if pr == r and pf == f and prs ~= rs then self:MergeEntry(previous, key) end
     end
     self:MigrateLegacy(key)
 end
@@ -263,20 +256,147 @@ end
 -- old, until the player forgets it, so a character of the other faction gets
 -- its copy too.
 function Ledger:MigrateLegacy(key)
-    local region, ruleset = key:match("^(%a+)%-(%a+)%-")
+    local region, ruleset, faction = key:match("^(%a+)%-(%a+)%-(%a+)$")
     local char = ML.charDB
-    for oldKey, old in pairs(ML.db.realms) do
-        if oldKey ~= key and not Ledger.IsAuctionHouseKey(oldKey) then
-            if type(old.mergedInto) ~= "table" then old.mergedInto = {} end
-            local r, rs = Ledger.ParseLegacyRealm(oldKey)
-            local match = (r == region and rs == ruleset) or (char ~= nil and char.realm == oldKey)
-            local tag = oldKey .. ">" .. key
-            if match and not old.mergedInto[key] and not self.migrating[tag] then
-                self.migrating[tag] = true
-                self:StartMerge(oldKey, key)
+    local list = {}
+    for oldKey in pairs(ML.db.realms) do list[#list + 1] = oldKey end   -- MergeEntry may remove entries
+    for _, oldKey in ipairs(list) do
+        local old = ML.db.realms[oldKey]
+        if old and oldKey ~= key and not Ledger.IsAuctionHouseKey(oldKey) then
+            local match
+            local lr, lf = Ledger.ParseAuctionatorList(oldKey)
+            if lr then
+                -- named after an Auctionator list ("PvE Alliance", made by 0.2.7's
+                -- Import All): it belongs to exactly that auction house
+                match = lr == ruleset and lf == faction
+            else
+                local r, rs = Ledger.ParseLegacyRealm(oldKey)
+                match = (r == region and rs == ruleset) or (char ~= nil and char.realm == oldKey)
             end
+            if match then self:MergeEntry(oldKey, key) end
         end
     end
+end
+
+-- Moves one ledger entry into an auction house: daily prices, then scan
+-- detail, each once (0.2.7 and 0.2.8 moved daily prices only). An entry
+-- named after an Auctionator list is removed once both are in.
+function Ledger:MergeEntry(fromKey, toKey)
+    local old = ML.db.realms[fromKey]
+    if not old then return end
+    if type(old.mergedInto) ~= "table" then old.mergedInto = {} end
+    if type(old.scansMergedInto) ~= "table" then old.scansMergedInto = {} end
+    local tag = fromKey .. ">" .. toKey
+    if not old.mergedInto[toKey] and not self.migrating[tag] then
+        self.migrating[tag] = true
+        self:StartMerge(fromKey, toKey)
+    end
+    local hasScans = type(old.scans) == "table" and type(old.scans.log) == "table" and next(old.scans.log) ~= nil
+    if not hasScans then
+        old.scansMergedInto[toKey] = true
+    elseif not old.scansMergedInto[toKey] and not self.migrating["scans:" .. tag] then
+        self.migrating["scans:" .. tag] = true
+        self:StartScanMerge(fromKey, toKey)
+    end
+    self:DropDuplicate(fromKey, toKey)
+end
+
+-- Entries named after an Auctionator list ("PvE Alliance") were made by
+-- 0.2.7's Import All. Once everything in one is in its auction house, it's a
+-- duplicate and goes. (Old realm entries stay until the player forgets them,
+-- so a character of the other faction can still get its copy.)
+function Ledger:DropDuplicate(fromKey, toKey)
+    local old = ML.db.realms[fromKey]
+    if not old or not Ledger.ParseAuctionatorList(fromKey) then return end
+    if not (type(old.mergedInto) == "table" and old.mergedInto[toKey]) then return end
+    if not (type(old.scansMergedInto) == "table" and old.scansMergedInto[toKey]) then return end
+    ML.db.realms[fromKey] = nil
+    self.index[fromKey] = nil
+    if ML.db.settings.realm == fromKey then ML.db.settings.realm = nil end
+    ns.Print(("removed the entry \"%s\": everything in it is now in %s."):format(fromKey, self:RealmName(toKey)))
+    ML:RequestUIRefresh()
+end
+
+-- Scan detail: both scan logs are renumbered into one, in time order, and
+-- every item's scan records are remapped and merged. It runs as one job; new
+-- scans wait for it (NextScan checks scanMerging) and the target's tables are
+-- refilled in place at the end, so other jobs holding them stay valid.
+function Ledger:StartScanMerge(fromKey, toKey)
+    local from = self:Realm(fromKey)
+    local src = from and from.scans
+    if not src then return end
+    self.scanMerging = (self.scanMerging or 0) + 1
+    local function Remap(s, map)
+        local out = Codec.NewList()
+        if not s then return out end
+        local L = Codec.Decode(s)
+        for i = 1, L.n do
+            local id = map[L.d[i]]                    -- records of scans no longer in the log are dropped
+            if id then Codec.Push(out, id, L.l[i], L.h[i], L.q[i]) end
+        end
+        return out
+    end
+    local job = { name = "scanmerge", label = "moving scan detail into " .. self:RealmName(toKey), i = 1, keys = {} }
+    function job:Setup()                              -- on the first step, so scans saved before it are included
+        local dst = Ledger:Scans(toKey, true)
+        local all = {}
+        for id, t in pairs(dst.log) do all[#all + 1] = { t, 1, id } end
+        for id, t in pairs(src.log) do all[#all + 1] = { t, 2, id } end
+        table.sort(all, function(x, y)
+            if x[1] ~= y[1] then return x[1] < y[1] end
+            if x[2] ~= y[2] then return x[2] < y[2] end
+            return x[3] < y[3]
+        end)
+        self.mapD, self.mapS, self.log, self.count, self.full = {}, {}, {}, {}, {}
+        for i, e in ipairs(all) do
+            local store = (e[2] == 1) and dst or src
+            if e[2] == 1 then self.mapD[e[3]] = i else self.mapS[e[3]] = i end
+            self.log[i], self.count[i], self.full[i] = e[1], store.count[e[3]], store.full[e[3]] or nil
+        end
+        self.n, self.dst, self.newItems, self.records = #all, dst, {}, 0
+        local seen = {}
+        for k in pairs(dst.items) do seen[k] = true; self.keys[#self.keys + 1] = k end
+        for k in pairs(src.items) do if not seen[k] then self.keys[#self.keys + 1] = k end end
+    end
+    function job:Step(deadline)
+        if not self.dst then self:Setup() end
+        local compress, dst, list, n = ML.db.settings.compress, self.dst, self.keys, #self.keys
+        while self.i <= n do
+            local k = list[self.i]
+            self.i = self.i + 1
+            local C = Codec.MergeLists(Remap(dst.items[k], self.mapD), Remap(src.items[k], self.mapS))
+            if C.n > 0 then
+                self.newItems[k] = Codec.Merge(nil, C, C.l[C.n], compress, nil)
+                self.records = self.records + C.n
+            end
+            if self.i % 8 == 0 and ns.Clock() >= deadline then return false end
+        end
+        return true
+    end
+    function job:Progress() return self.i - 1, #self.keys end
+    function job:OnDone()
+        Ledger.scanMerging = (Ledger.scanMerging or 1) - 1
+        if Ledger.scanMerging <= 0 then Ledger.scanMerging = nil end
+        if not self.failed and self.dst then
+            local dst = self.dst
+            wipe(dst.log); wipe(dst.count); wipe(dst.full); wipe(dst.items)
+            for i = 1, self.n do dst.log[i], dst.count[i], dst.full[i] = self.log[i], self.count[i], self.full[i] end
+            for k, v in pairs(self.newItems) do dst.items[k] = v end
+            dst.seq = self.n
+            if (dst.lastFull or 0) == 0 then dst.lastFull = src.lastFull or 0 end
+            if type(from.scansMergedInto) ~= "table" then from.scansMergedInto = {} end
+            from.scansMergedInto[toKey] = true
+            Ledger.scanHist = nil
+            ns.Print(("moved the scan detail recorded under %s into %s (%s scans now)."):format(
+                Ledger:RealmName(fromKey), Ledger:RealmName(toKey), ns.Commas(self.n)))
+            Ledger:PruneScans(toKey, true)
+            Ledger:RefreshScanStats(toKey)
+            Ledger:DropDuplicate(fromKey, toKey)
+        end
+        Ledger:NextScan()
+        ML:RequestUIRefresh()
+    end
+    ns.StartJob(job)
 end
 
 function Ledger:StartMerge(fromKey, toKey)
@@ -321,6 +441,7 @@ function Ledger:StartMerge(fromKey, toKey)
         ns.Print(("moved the history recorded under %s into %s (%s daily prices). The old entry stays on the Options tab until you forget it."):format(
             Ledger:RealmName(fromKey), Ledger:RealmName(toKey), ns.Commas(self.added)))
         Ledger:RefreshStats(toKey)
+        Ledger:DropDuplicate(fromKey, toKey)
         ML:RequestUIRefresh()
     end
     ns.StartJob(job)
@@ -623,7 +744,7 @@ function Ledger:RecordNow(reason, silent)
 end
 
 -- /mendel import: every realm Auctionator knows, all days (merging is idempotent)
-function Ledger:ImportAll()
+function Ledger:ImportAll(quiet)
     local root = rawget(_G, "AUCTIONATOR_PRICE_DATABASE")
     if type(root) ~= "table" then ns.Print("Auctionator isn't loaded, so there is nothing to import.") return end
     local liveSrc, liveKey = self:LiveSource()
@@ -658,7 +779,7 @@ function Ledger:ImportAll()
             else src = self:DecodeCBOR(v) end
             if src then
                 n = n + 1
-                self:Enqueue({ key = key, src = src, reason = "import", full = true, silent = false, current = key == liveKey })
+                self:Enqueue({ key = key, src = src, reason = "import", full = true, silent = quiet and true or false, current = key == liveKey })
             else
                 failed = failed + 1
             end
@@ -669,6 +790,7 @@ function Ledger:ImportAll()
         if skipped == 0 then ns.Print("Auctionator has no prices saved yet.") end
         return
     end
+    if quiet then return end
     ns.Print(("importing %d price list%s from Auctionator%s."):format(n, n == 1 and "" or "s",
         failed > 0 and (" (%d couldn't be unpacked on this client)"):format(failed) or ""))
 end
@@ -744,7 +866,7 @@ end
 function Ledger:HarvestDone(job)
     local realm = self:Realm(job.key, true)
     if not job.failed then
-        realm.settled = job.today - 1
+        realm.settled = math.min(job.today, ML.sessionDay or job.today) - 1
         realm.lastRecord = time()
         realm.lastAdded, realm.lastUpdated = job.added, job.updated
     end
@@ -765,9 +887,9 @@ function Ledger:HarvestDone(job)
     if not job.req.silent or (job.added > 0 and s.announce) then
         ns.Print(("%s: %s"):format(self:RealmName(job.key), self.status))
     end
-    if not job.failed and job.added > 0 and not Ledger.IsAuctionHouseKey(job.key) and type(realm.mergedInto) == "table" then
+    if not job.failed and job.updated > 0 and not Ledger.IsAuctionHouseKey(job.key) and type(realm.mergedInto) == "table" then
         for houseKey in pairs(realm.mergedInto) do self.migrating[job.key .. ">" .. houseKey] = nil end
-        realm.mergedInto = {}                         -- an old realm got more history: pass it on again
+        realm.mergedInto = {}                         -- an old realm got more (or corrected) history: pass it on again
         if self.noted then self:MigrateLegacy(self.noted) end
     end
     if s.keepDays > 0 then self:Prune(job.key) end
@@ -1530,6 +1652,7 @@ end
 local FULL_MIN, FULL_SHARE = 500, 0.5
 
 function Ledger:NextScan()
+    if self.scanMerging then return end               -- picked up again when the move finishes
     local req = table.remove(self.scanQueue, 1)
     if not req then return end
     local sc = self:Scans(req.key, true)
@@ -1709,6 +1832,16 @@ function Ledger:OnLogin()
     end
     self:HookScans()
     self:ScheduleRecord(10, "login", true)
+    -- 0.2.9, once: read every Auctionator price list in full again. Merging is
+    -- idempotent; this picks up days a session past midnight left unread.
+    if (ML.db.catchUp or 0) < 1 then
+        C_Timer.After(20, function()
+            if (ML.db.catchUp or 0) < 1 then
+                ML.db.catchUp = 1
+                Ledger:ImportAll(true)
+            end
+        end)
+    end
 end
 
 -- Auctionator can rebuild its Database; make sure the scan hook is on the current one

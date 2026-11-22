@@ -24,7 +24,7 @@ local ML = {}
 ns.ML = ML
 _G.MendeLedger = ML
 
-ML.VERSION          = "0.2.8"
+ML.VERSION          = "0.2.9"
 ML.TESTED_INTERFACE = 16001                                   -- RETEST: the build this was written against
 ML.PREFIX           = "|cffe6b422MendeLedger:|r "
 
@@ -247,6 +247,7 @@ ns.DEFAULTS = {
     namesLocale = "",
     realms      = {},             -- [auction house key, e.g. "US-PvE-Alliance", or an old realm key] = { items = ..., ... }
     houses      = {},             -- [auction house key] = { seen, aKey = Auctionator's list now, aKeys = every list it used }
+    catchUp     = 0,              -- 1 once the 0.2.9 one-time re-read of Auctionator's lists has run
 }
 
 local function Copy(v)
@@ -319,6 +320,10 @@ function ML:InitDB()
         db.namesLocale = locale
     end
     self.db = db
+    -- Auctionator decides which day it is when it loads and keeps writing to
+    -- that day all session, even past midnight; recording uses this to know
+    -- which days are final
+    self.sessionDay = ns.Today()
 
     -- per character: the realm this character's prices are filed under. The
     -- game keeps this file in the character's realm folder, so it stays right
