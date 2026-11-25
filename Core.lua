@@ -10,12 +10,14 @@ local addonName, ns = ...
 -- out-of-combat queue, the background job runner, the capability probe and
 -- the /mendel command.
 --
--- The only unit data MendeLedger reads is UnitFactionGroup("player"), to know
--- which auction house the character uses (Ledger.lua); it never reads health,
--- power or names, the combat log or secure snippets. That value and every other
--- value from game APIs (item names, links, build info) go through ns.Text /
--- ns.Num, which drop Midnight "secret" values before anything compares,
--- prints or does arithmetic with them.
+-- The only unit data MendeLedger reads is for the auction house (Ledger.lua):
+-- UnitFactionGroup("player"), and UnitGUID("player") passed straight to
+-- C_BattleNet.GetGameAccountInfoByGUID for the region (never compared, parsed
+-- or stored). It never reads health, power or names, the combat log or secure
+-- snippets, and never keys anything by realm. Values from game APIs (faction,
+-- region, rules, item names, links, settings, build info) go through
+-- ns.Text / ns.Num / ns.IsSecret, which drop Midnight "secret" values before
+-- anything compares, branches on, prints or does arithmetic with them.
 --
 -- Lines marked RETEST depend on the client build; check them when the
 -- interface number moves off 16001.
@@ -24,7 +26,7 @@ local ML = {}
 ns.ML = ML
 _G.MendeLedger = ML
 
-ML.VERSION          = "0.2.9"
+ML.VERSION          = "0.3.0"
 ML.TESTED_INTERFACE = 16001                                   -- RETEST: the build this was written against
 ML.PREFIX           = "|cffe6b422MendeLedger:|r "
 
@@ -185,7 +187,7 @@ end
 local function Use24Hour()
     local get = (C_CVar and C_CVar.GetCVarBool) or rawget(_G, "GetCVarBool")   -- RETEST
     local v = get and ns.SafeCall(get, "timeMgrUseMilitaryTime")
-    if v == nil then return true end
+    if v == nil or ns.IsSecret(v) then return true end
     return v and true or false
 end
 
@@ -330,6 +332,7 @@ function ML:InitDB()
     -- even though WoW Forever no longer tells addons the realm.
     if type(MendeLedgerCharDB) ~= "table" then MendeLedgerCharDB = {} end
     local char = MendeLedgerCharDB
+    -- char.realm was written by 0.2.6; it's only read to move that history (never written)
     if char.realm ~= nil and (type(char.realm) ~= "string" or char.realm == "") then char.realm = nil end
     if char.ah ~= nil and (type(char.ah) ~= "string" or char.ah == "") then char.ah = nil end
     self.charDB = char
@@ -502,9 +505,9 @@ local HELP = {
     { "/mendel <text>", "open the window and search (names, types, stats, effects, set bonuses or an item ID)" },
     { "/mendel record", "record Auctionator's prices now" },
     { "/mendel import", "record everything Auctionator has prices for" },
-    { "/mendel realms", "list the auction houses in the ledger (and realms from before 0.2.7)" },
-    { "/mendel realm <name>", "show another auction house's history" },
-    { "/mendel thisrealm <name>", "which auction house this character uses (only if MendeLedger can't tell)" },
+    { "/mendel houses", "list the auction houses in the ledger" },
+    { "/mendel house <name>", "show another auction house's history" },
+    { "/mendel use <name>", "record this character into an auction house (only if MendeLedger can't tell which)" },
     { "/mendel keep <days | forever>", "how long to keep history (e.g. /mendel keep 365)" },
     { "/mendel compress on | off", "compress sealed history (when it saves 10% or more)" },
     { "/mendel scans on | off", "keep every Auctionator scan, for prices by time of day" },
@@ -582,7 +585,7 @@ commands.keep = function(rest)
     end
     ML:SetKeepDays(floor(days))
 end
-commands.realms = function()
+commands.houses = function()
     local list = ns.Ledger:RealmList()
     if #list == 0 then ns.Print("the ledger is empty. Scan the auction house with Auctionator first.") return end
     ns.Print("auction houses in the ledger:")
@@ -591,21 +594,24 @@ commands.realms = function()
             r.old and (r.merged and "  (old realm, history moved)" or "  (old realm)") or "", ns.Commas(r.items), ns.Ago(r.lastRecord)))
     end
 end
-commands.thisrealm = function(rest)
+commands.use = function(rest)
     if rest == "" then
         local key = ns.Ledger:CurrentRealmKey()
         ns.Print(key and ("this character's prices are recorded into %s."):format(ns.Ledger:RealmName(key))
-            or "MendeLedger can't tell which auction house this character uses. Type /mendel thisrealm <name>; /mendel realms lists the ones it has.")
+            or "MendeLedger can't tell which auction house this character uses. Type /mendel use <name>; /mendel houses lists the ones it has.")
         return
     end
-    ns.Ledger:SetCharacterRealm(rest)
+    ns.Ledger:SetCharacterHouse(rest)
 end
-commands.realm = function(rest)
+commands.thisrealm = commands.use                -- older name
+commands.realms = commands.houses           -- older name
+commands.house = function(rest)
     local key = ns.Ledger:FindRealm(rest)
-    if not key then ns.Print("nothing in the ledger matches \"" .. rest .. "\". Try /mendel realms.") return end
+    if not key then ns.Print("nothing in the ledger matches \"" .. rest .. "\". Try /mendel houses.") return end
     ML:ShowRealm(key)
     ML:Open("ledger")
 end
+commands.realm = commands.house             -- older name
 
 SLASH_MENDELEDGER1 = "/mendel"
 SLASH_MENDELEDGER2 = "/mendeledger"

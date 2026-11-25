@@ -80,74 +80,98 @@ function Ledger:AuctionatorDays()
     return type(cfg) == "table" and Num(cfg.price_history_days) or 21     -- RETEST
 end
 
--- The key Auctionator files the current realm under (its connected-realm
--- root), so both ledgers line up and imports map one to one.
--- What the game (through Auctionator) says the realm is, or nil when it
--- won't say. Since the WoW Forever hotfix of 2026-11-20, realm names and IDs
--- come back empty ("" and 0) on purpose, so on Forever this is nil.
-function Ledger:GameRealmKey()
-    local Au = A()
-    if type(Au) == "table" then
-        if type(Au.State) == "table" and Text(Au.State.CurrentRealm) then return Au.State.CurrentRealm end   -- RETEST
-        if type(Au.Variables) == "table" then
-            local r = Text((ns.SafeCall(Au.Variables.GetConnectedRealmRoot)))
-            if r then return r end
-        end
-    end
-    local list = GetAutoCompleteRealms and ns.SafeCall(GetAutoCompleteRealms)   -- RETEST
-    if type(list) == "table" and #list > 0 then
-        local copy = {}
-        for _, name in ipairs(list) do
-            if Text(name) then copy[#copy + 1] = name end
-        end
-        table.sort(copy)
-        if copy[1] then return copy[1] end
-    end
-    return Text(GetNormalizedRealmName and ns.SafeCall(GetNormalizedRealmName))   -- RETEST: "" on Forever since 2026-11-20
-end
-
 -------------------------------------------------------------------------------
--- Auction houses. WoW Forever has no player-facing realms: one auction house
--- serves everyone in the same region (US, EU or Other), ruleset (PvE, PvP, RP
--- or Hardcore) and faction. MendeLedger files prices under that, as a key such
--- as "US-PvE-Alliance" (shown as "US / PvE / Alliance").
+-- Auction houses. WoW Forever has no realms: one auction house serves everyone
+-- in the same region, ruleset and faction. MendeLedger files prices under that,
+-- as a key such as "US-PvE-Alliance" (shown "US / PvE / Alliance"). Nothing is
+-- keyed by realm. Region, ruleset and faction are read only with GetRegion,
+-- GetRuleset (both as given in the addon guidelines) and UnitFactionGroup.
 -------------------------------------------------------------------------------
-local REGION_NAMES = { [1] = "US", [3] = "EU" }          -- every other region: "Other"
+local REGION_CODES = { [1] = "US", [2] = "KR", [3] = "EU", [4] = "TW", [5] = "CN" }
+local REGION_SHOWN = { KRTW = "KR/TW" }
 local FACTIONS = { Alliance = true, Horde = true }
+local AH = "^(%a+)%-(%a+)%-(%a+)$"
 Ledger.migrating = {}
 
-function Ledger:Region()
-    local n = Num((ns.SafeCall(rawget(_G, "GetCurrentRegion"))))           -- RETEST
-    if not n or n <= 0 then return nil end
-    return REGION_NAMES[n] or "Other"
-end
-
--- The same rules and order as Auctionator 350 (GetRegionalRulesetName), so a
--- MendeLedger auction house matches one Auctionator price list: RP and PvP
--- both on = RP-PvP, then PvP, then RP, then Hardcore, otherwise PvE. nil when unknown.
-function Ledger:Ruleset()
-    local active = C_GameRules and C_GameRules.IsGameRuleActive               -- RETEST
-    local rules = Enum and Enum.GameRule
-    if type(active) ~= "function" or type(rules) ~= "table" then return nil end
-    local unknown = false
-    local function On(rule)
-        if rule == nil then return false end
-        local v = ns.SafeCall(active, rule)
-        if ns.IsSecret(v) then unknown = true return false end
-        return v == true
+-- GetRegion: the regionID of the player's Battle.net game account first, then
+-- the portal-based functions. Returns the region code and where it came from.
+local function GetRegion()
+    if C_BattleNet and C_BattleNet.GetGameAccountInfoByGUID then                   -- RETEST
+        local info = ns.SafeCall(C_BattleNet.GetGameAccountInfoByGUID, (ns.SafeCall(UnitGUID, "player")))
+        local id = type(info) == "table" and Num(info.regionID) or nil
+        if id and REGION_CODES[id] then return REGION_CODES[id], "Battle.net game account" end
     end
-    local pvp, rp, hardcore = On(rules.PvPRuleset), On(rules.RPRuleset), On(rules.HardcoreRuleset)
-    if unknown then return nil end
-    if pvp and rp then return "RPPvP" end
-    if pvp then return "PvP" end
-    if rp then return "RP" end
-    if hardcore then return "Hardcore" end
-    return "PvE"
+    if GetCurrentRegionName then                                                      -- RETEST
+        local name = Text((ns.SafeCall(GetCurrentRegionName)))
+        if name and name:match("^%a+$") then return name:upper(), "portal name" end
+    end
+    if GetCurrentRegion then                                                          -- RETEST
+        local id = Num((ns.SafeCall(GetCurrentRegion)))
+        if id and REGION_CODES[id] then return REGION_CODES[id], "portal ID" end
+    end
+    return nil
 end
 
--- Auctionator 350+ names its Forever price lists "<ruleset> <faction>", e.g.
--- "PvE Alliance" or "RPPvP Horde". Ruleset and faction from such a name, or nil.
-local AUCTIONATOR_RULESETS = { PvE = "PvE", PvP = "PvP", RP = "RP", RPPvP = "RPPvP", HC = "Hardcore" }
+-- KR and TW count as one region group ("KRTW", shown "KR/TW") until a Taiwan
+-- player confirms that the regionID reads TW on Forever
+function Ledger:Region()
+    local region, source = GetRegion()
+    if region == "KR" or region == "TW" then region = "KRTW" end
+    return region, source
+end
+
+-- GetRuleset: Hardcore, then RP, then PvP, otherwise PvE. nil when the
+-- functions are missing on this build (or a rule's answer is secret).
+local function GetRuleset()
+    if not (C_GameRules and C_GameRules.IsGameRuleActive and Enum and Enum.GameRule) then   -- RETEST
+        return nil
+    end
+    local unknown = false
+    local function active(name)
+        local id = Enum.GameRule[name]
+        if id == nil then return false end
+        local v = ns.SafeCall(C_GameRules.IsGameRuleActive, id)
+        if ns.IsSecret(v) then unknown = true return false end
+        return v and true or false
+    end
+    local ruleset = (active("HardcoreRuleset") and "Hardcore") or (active("RPRuleset") and "RP")
+        or (active("PvPRuleset") and "PvP") or "PvE"
+    if unknown then return nil end
+    return ruleset
+end
+Ledger.Ruleset = function() return GetRuleset() end
+
+-- "Alliance" or "Horde" from UnitFactionGroup("player"); a secret or missing
+-- value counts as unknown
+function Ledger:Faction()
+    local f = Text((ns.SafeCall(rawget(_G, "UnitFactionGroup"), "player")))  -- RETEST
+    return (f and FACTIONS[f]) and f or nil
+end
+
+function Ledger:AuctionHouseKey()
+    local region, ruleset, faction = self:Region(), GetRuleset(), self:Faction()
+    if region and ruleset and faction then return region .. "-" .. ruleset .. "-" .. faction end
+    return nil
+end
+
+function Ledger.IsAuctionHouseKey(key)
+    if type(key) ~= "string" then return false end
+    local _, _, faction = key:match(AH)
+    return faction ~= nil and FACTIONS[faction] == true
+end
+
+local RULESET_SHOWN = { RPPvP = "RP-PvP" }                   -- only in keys 0.2.8 made
+function Ledger.AuctionHouseName(key)
+    local region, ruleset, faction = key:match(AH)
+    if not region then return key end
+    return (REGION_SHOWN[region] or region) .. " / " .. (RULESET_SHOWN[ruleset] or ruleset) .. " / " .. faction
+end
+
+-- Auctionator 350+ names its Forever price lists "<ruleset> <faction>". This
+-- only tells which auction house such a list belongs to (the ruleset itself is
+-- read with GetRuleset): Auctionator's "RPPvP" is RP, because GetRuleset sees
+-- RP first, and "HC" is Hardcore.
+local AUCTIONATOR_RULESETS = { PvE = "PvE", PvP = "PvP", RP = "RP", RPPvP = "RP", HC = "Hardcore" }
 function Ledger.ParseAuctionatorList(aKey)
     if type(aKey) ~= "string" then return nil end
     local r, f = aKey:match("^(%a+) (%a+)$")                              -- RETEST: Auctionator 350's list names
@@ -156,51 +180,22 @@ function Ledger.ParseAuctionatorList(aKey)
     return nil
 end
 
--- "Alliance" or "Horde". The only unit data MendeLedger reads; a secret or
--- missing value counts as unknown.
-function Ledger:Faction()
-    local f = Text((ns.SafeCall(rawget(_G, "UnitFactionGroup"), "player")))  -- RETEST
-    return (f and FACTIONS[f]) and f or nil
-end
-
--- When Auctionator names its price list after the ruleset and faction (350+),
--- those are used, so the two match one to one; otherwise the game is asked.
-function Ledger:AuctionHouseKey()
-    local region = self:Region()
-    if not region then return nil end
-    local ruleset, faction = Ledger.ParseAuctionatorList(Text(self:AuctionatorKey()))
-    if not ruleset then ruleset, faction = self:Ruleset(), self:Faction() end
-    if ruleset and faction then return region .. "-" .. ruleset .. "-" .. faction end
-    return nil
-end
-
-function Ledger.IsAuctionHouseKey(key)
-    if type(key) ~= "string" then return false end
-    local _, _, faction = key:match("^(%a+)%-(%a+)%-(%a+)$")
-    return faction ~= nil and FACTIONS[faction] == true
-end
-
-local RULESET_NAMES = { RPPvP = "RP-PvP" }
-function Ledger.AuctionHouseName(key)
-    local region, ruleset, faction = key:match("^(%a+)%-(%a+)%-(%a+)$")
-    return region and (region .. " / " .. (RULESET_NAMES[ruleset] or ruleset) .. " / " .. faction) or key
-end
-
--- Region and ruleset of an old realm key such as "CAMWOWUS1Realm3PvE"
--- (nil when the key doesn't look like one, or the ruleset can't be read)
-function Ledger.ParseLegacyRealm(key)
+-- Migration only: region group and ruleset of a key saved before 0.2.7, when
+-- MendeLedger and Auctionator still filed prices by realm ("CAMWOWUS1Realm3PvE").
+-- Nothing new is ever keyed this way.
+function Ledger.ParseOldKey(key)
     if type(key) ~= "string" then return nil end
     local region = key:match("^CAMWOW(%a%a)%d")
-    if not region then return nil end
-    if region ~= "US" and region ~= "EU" then region = "Other" end
+    if region == "KR" or region == "TW" then region = "KRTW"
+    elseif region ~= "US" and region ~= "EU" and region ~= "CN" then return nil end
     local tail = key:match("Realm%d+(%a+)$")
     tail = tail and tail:lower()
-    local ruleset = (tail == "pve" and "PvE") or (tail == "pvp" and "PvP") or (tail == "rp" and "RP")
-        or (tail == "rppvp" and "RPPvP") or ((tail == "hardcore" or tail == "hc") and "Hardcore") or nil
+    local ruleset = (tail == "pve" and "PvE") or (tail == "pvp" and "PvP") or ((tail == "rp" or tail == "rppvp") and "RP")
+        or ((tail == "hardcore" or tail == "hc") and "Hardcore") or nil
     return region, ruleset
 end
 
--- Auctionator's key for this session's price list ("" since the hotfix), or nil
+-- Auctionator's key for this session's price list, or nil
 function Ledger:AuctionatorKey()
     local Au = A()
     if type(Au) == "table" and type(Au.State) == "table" and type(Au.State.CurrentRealm) == "string" then
@@ -210,7 +205,7 @@ function Ledger:AuctionatorKey()
 end
 
 -- Notes which of Auctionator's price lists this auction house uses, names its
--- ledger entry and merges in matching history from before 0.2.7
+-- entry, and moves in history from entries that belong to it
 function Ledger:NoteAuctionHouse(key, previous)
     if self.noted == key then return end
     self.noted = key
@@ -223,16 +218,21 @@ function Ledger:NoteAuctionHouse(key, previous)
         if type(h.aKeys) ~= "table" then h.aKeys = {} end
         h.aKeys[aKey] = true                          -- every list it has used, for Import All
     end
-    local realm = self:Realm(key, true)
-    realm.name = realm.name or Ledger.AuctionHouseName(key)
-    -- A character can't change region or ruleset, so if its remembered auction
-    -- house differs only in the ruleset, the naming changed (0.2.7 called RP-PvP
-    -- "RP" and checked Hardcore first): its history comes along, once.
+    local entry = self:Realm(key, true)
+    entry.name = entry.name or Ledger.AuctionHouseName(key)
+    -- The character's auction house under an older name (0.2.8 named rulesets
+    -- after Auctionator, e.g. "RPPvP"; 0.2.7-0.2.9 called KR, TW and CN "Other")
+    -- is moved into this one, then removed. A character can't change region
+    -- or ruleset, so these can only be renames.
     if previous and previous ~= key and Ledger.IsAuctionHouseKey(previous) and ML.db.realms[previous] then
-        local pr, prs, pf = previous:match("^(%a+)%-(%a+)%-(%a+)$")
-        local r, rs, f = key:match("^(%a+)%-(%a+)%-(%a+)$")
-        local old = ML.db.realms[previous]
-        if pr == r and pf == f and prs ~= rs then self:MergeEntry(previous, key) end
+        local pr, prs, pf = previous:match(AH)
+        local r, rs, f = key:match(AH)
+        if pf == f and ((pr == r and prs ~= rs) or (pr == "Other" and prs == rs)) then
+            local old = ML.db.realms[previous]
+            if type(old.dropAfter) ~= "table" then old.dropAfter = {} end
+            old.dropAfter[key] = true
+            self:MergeEntry(previous, key)
+        end
     end
     self:MigrateLegacy(key)
 end
@@ -250,37 +250,50 @@ function Ledger:AuctionatorShared(key)
     return false
 end
 
--- Prices recorded before 0.2.7 are filed under realm names. Each old realm
--- whose region and ruleset match this auction house (or that this character
--- was recorded into) is merged into it once. The old entry stays, marked as
--- old, until the player forgets it, so a character of the other faction gets
--- its copy too.
+-- Entries from before auction houses are moved into the auction houses they
+-- belong to, then removed, so no saved data stays keyed by realm:
+--   * old realm keys ("CAMWOWUS1Realm3PvE"): into this auction house and the
+--     account's other known auction houses with the same region and ruleset
+--     (the old data never told factions apart)
+--   * entries named after an Auctionator list ("PvE Alliance", made by
+--     0.2.7's Import All): into that list's auction house
+--   * anything else that this character was recorded into under 0.2.6
 function Ledger:MigrateLegacy(key)
-    local region, ruleset, faction = key:match("^(%a+)%-(%a+)%-(%a+)$")
+    local region, ruleset = key:match(AH)
     local char = ML.charDB
     local list = {}
-    for oldKey in pairs(ML.db.realms) do list[#list + 1] = oldKey end   -- MergeEntry may remove entries
+    for oldKey in pairs(ML.db.realms) do list[#list + 1] = oldKey end   -- entries may be removed below
     for _, oldKey in ipairs(list) do
         local old = ML.db.realms[oldKey]
         if old and oldKey ~= key and not Ledger.IsAuctionHouseKey(oldKey) then
-            local match
+            local targets = {}
             local lr, lf = Ledger.ParseAuctionatorList(oldKey)
             if lr then
-                -- named after an Auctionator list ("PvE Alliance", made by 0.2.7's
-                -- Import All): it belongs to exactly that auction house
-                match = lr == ruleset and lf == faction
+                targets[region .. "-" .. lr .. "-" .. lf] = true
             else
-                local r, rs = Ledger.ParseLegacyRealm(oldKey)
-                match = (r == region and rs == ruleset) or (char ~= nil and char.realm == oldKey)
+                local r, rs = Ledger.ParseOldKey(oldKey)
+                if (r and r == region and rs == ruleset) or (char ~= nil and char.realm == oldKey) then
+                    targets[key] = true
+                    for houseKey in pairs(ML.db.houses) do
+                        local hr, hrs = houseKey:match(AH)
+                        if hr == region and hrs == ruleset then targets[houseKey] = true end
+                    end
+                end
             end
-            if match then self:MergeEntry(oldKey, key) end
+            if next(targets) then
+                if type(old.dropAfter) ~= "table" then old.dropAfter = {} end
+                for target in pairs(targets) do
+                    old.dropAfter[target] = true
+                    self:MergeEntry(oldKey, target)
+                end
+            end
         end
     end
 end
 
--- Moves one ledger entry into an auction house: daily prices, then scan
--- detail, each once (0.2.7 and 0.2.8 moved daily prices only). An entry
--- named after an Auctionator list is removed once both are in.
+-- Moves one entry into an auction house: daily prices, then scan detail, each
+-- once; the entry is removed once everything is in every auction house it
+-- belongs to (DropLegacy)
 function Ledger:MergeEntry(fromKey, toKey)
     local old = ML.db.realms[fromKey]
     if not old then return end
@@ -298,22 +311,24 @@ function Ledger:MergeEntry(fromKey, toKey)
         self.migrating["scans:" .. tag] = true
         self:StartScanMerge(fromKey, toKey)
     end
-    self:DropDuplicate(fromKey, toKey)
+    self:DropLegacy(fromKey)
 end
 
--- Entries named after an Auctionator list ("PvE Alliance") were made by
--- 0.2.7's Import All. Once everything in one is in its auction house, it's a
--- duplicate and goes. (Old realm entries stay until the player forgets them,
--- so a character of the other faction can still get its copy.)
-function Ledger:DropDuplicate(fromKey, toKey)
+function Ledger:DropLegacy(fromKey)
     local old = ML.db.realms[fromKey]
-    if not old or not Ledger.ParseAuctionatorList(fromKey) then return end
-    if not (type(old.mergedInto) == "table" and old.mergedInto[toKey]) then return end
-    if not (type(old.scansMergedInto) == "table" and old.scansMergedInto[toKey]) then return end
+    if not old or type(old.dropAfter) ~= "table" or not next(old.dropAfter) then return end
+    for target in pairs(old.dropAfter) do
+        if not (type(old.mergedInto) == "table" and old.mergedInto[target]) then return end
+        if not (type(old.scansMergedInto) == "table" and old.scansMergedInto[target]) then return end
+    end
+    local name = self:RealmName(fromKey)
+    local into = {}
+    for target in pairs(old.dropAfter) do into[#into + 1] = self:RealmName(target) end
+    table.sort(into)
     ML.db.realms[fromKey] = nil
     self.index[fromKey] = nil
     if ML.db.settings.realm == fromKey then ML.db.settings.realm = nil end
-    ns.Print(("removed the entry \"%s\": everything in it is now in %s."):format(fromKey, self:RealmName(toKey)))
+    ns.Print(("removed the entry %s: everything in it is now in %s."):format(name, table.concat(into, " and ")))
     ML:RequestUIRefresh()
 end
 
@@ -391,7 +406,7 @@ function Ledger:StartScanMerge(fromKey, toKey)
                 Ledger:RealmName(fromKey), Ledger:RealmName(toKey), ns.Commas(self.n)))
             Ledger:PruneScans(toKey, true)
             Ledger:RefreshScanStats(toKey)
-            Ledger:DropDuplicate(fromKey, toKey)
+            Ledger:DropLegacy(fromKey)
         end
         Ledger:NextScan()
         ML:RequestUIRefresh()
@@ -441,86 +456,88 @@ function Ledger:StartMerge(fromKey, toKey)
         ns.Print(("moved the history recorded under %s into %s (%s daily prices). The old entry stays on the Options tab until you forget it."):format(
             Ledger:RealmName(fromKey), Ledger:RealmName(toKey), ns.Commas(self.added)))
         Ledger:RefreshStats(toKey)
-        Ledger:DropDuplicate(fromKey, toKey)
+        Ledger:DropLegacy(fromKey)
         ML:RequestUIRefresh()
     end
     ns.StartJob(job)
 end
 
--- The ledger entry this character's prices are filed under. In order:
---   1. its auction house from the game (region, ruleset, faction), remembered
---      for the character in MendeLedgerCharDB (a per-character saved variable)
+-- The auction house this character's prices are filed under. In order:
+--   1. from the game (GetRegion, GetRuleset, UnitFactionGroup), remembered for
+--      the character in MendeLedgerCharDB.ah (a per-character saved variable).
+--      A character can't change region, so when only the region reads
+--      differently from the remembered one (the portal setting can be wrong),
+--      the remembered one is kept: a misread region never splits a history.
 --   2. the auction house remembered for this character
---   3. on clients without those APIs, the realm, as before 0.2.7 (remembered)
---   4. the realm remembered for this character (from 0.2.6)
---   5. the only entry in the ledger, when there is just one
---   6. nil: MendeLedger asks once (/mendel thisrealm, or Use Here on the
---      Options tab) and records nothing until then; Auctionator keeps 21 days
--- self.realmSource says which: game, remembered, realm, rememberedRealm, only, unknown.
+--   3. the only auction house in the ledger
+--   4. nil: nothing is recorded, and MendeLedger says once how to choose
+--      (/mendel use <name>, or Use Here on the Options tab)
+-- self.houseSource says which: game, remembered, only, unknown.
 function Ledger:CurrentRealmKey()
     local char = ML.charDB
-    local key = self:AuctionHouseKey()
-    if key then
-        local previous = char and char.ah
+    local remembered = char and Ledger.IsAuctionHouseKey(char.ah) and char.ah or nil
+    local live = self:AuctionHouseKey()
+    if live then
+        local key = live
+        self.regionMismatch = nil
+        if remembered and remembered ~= live then
+            local rr, rrs, rf = remembered:match(AH)
+            local lr, lrs, lf = live:match(AH)
+            if rr ~= lr and rrs == lrs and rf == lf and rr ~= "Other" then
+                key, self.regionMismatch = remembered, lr
+            end
+        end
         if char then char.ah = key end
-        self.realmSource = "game"
-        self:NoteAuctionHouse(key, previous)
+        self.houseSource = "game"
+        self:NoteAuctionHouse(key, remembered)
         return key
     end
-    if char and Text(char.ah) then
-        self.realmSource = "remembered"
-        return char.ah
-    end
-    key = self:GameRealmKey()
-    if key then
-        if char then char.realm = key end
-        self.realmSource = "realm"
-        return key
-    end
-    if char and Text(char.realm) then
-        self.realmSource = "rememberedRealm"
-        return char.realm
+    if remembered then
+        self.houseSource = "remembered"
+        return remembered
     end
     local only, count = nil, 0
-    for k in pairs(ML.db.realms) do count = count + 1; only = k end
+    for k in pairs(ML.db.realms) do
+        if Ledger.IsAuctionHouseKey(k) then count = count + 1; only = k end
+    end
     if count == 1 then
         if char then char.ah = only end
-        self.realmSource = "only"
+        self.houseSource = "only"
         if not self.onlyNoticed then
             self.onlyNoticed = true
-            ns.Print(("MendeLedger couldn't work out this character's auction house, so it records into %s, the only one it has. If that's wrong, type /mendel thisrealm <name>."):format(self:RealmName(only)))
+            ns.Print(("MendeLedger couldn't read this character's region, ruleset or faction, so it records into %s, the only auction house it has. If that's wrong, type /mendel use <name>."):format(self:RealmName(only)))
         end
         return only
     end
-    self.realmSource = "unknown"
+    self.houseSource = "unknown"
     return nil
 end
 
 function Ledger:RealmUnknownNotice()
     if self.unknownNoticed then return end
     self.unknownNoticed = true
-    ns.Print("MendeLedger couldn't work out which auction house this character uses, so it doesn't know where to file its prices. "
-        .. "Open the Options tab, click the right entry under Auction Houses and press |cffffd100Use Here|r, or type |cffffd100/mendel thisrealm <name>|r. Nothing is lost meanwhile: Auctionator keeps its last 21 days.")
+    ns.Print("MendeLedger couldn't read this character's region, ruleset or faction, so it doesn't know which auction house to record into. "
+        .. "Open the Options tab, click the right auction house and press |cffffd100Use Here|r, or type |cffffd100/mendel use <name>|r. /mendel probe shows what's missing. Nothing is lost meanwhile: Auctionator keeps its last 21 days.")
 end
 
--- /mendel thisrealm <name> and the Use Here button: file this character's
--- prices under an existing realm (by key or name) or start a new one
-function Ledger:SetCharacterRealm(text)
+-- /mendel use <name> and the Use Here button: record this character into an
+-- existing auction house (only needed when the game won't say which)
+function Ledger:SetCharacterHouse(text)
     text = ns.Trim(text or "")
-    if text == "" then return nil end
-    local key = self:FindRealm(text)
-    local created = false
-    if not key then
-        key = text
-        local realm = self:Realm(key, true)
-        realm.name = text
-        created = true
+    local key = text ~= "" and self:FindRealm(text) or nil
+    if not key or not Ledger.IsAuctionHouseKey(key) then
+        local names = {}
+        for k in pairs(ML.db.realms) do if Ledger.IsAuctionHouseKey(k) then names[#names + 1] = self:RealmName(k) end end
+        table.sort(names)
+        ns.Print(#names > 0 and ("no auction house matches \"%s\". The ones MendeLedger has: %s."):format(text, table.concat(names, ", "))
+            or "MendeLedger has no auction houses yet: it needs one character whose region, ruleset and faction it can read.")
+        return nil
     end
     if ML.charDB then ML.charDB.ah = key end
     self.unknownNoticed, self.onlyNoticed = nil, true
-    ns.Print(("this character's prices are now recorded into %s%s."):format(self:RealmName(key), created and " (a new entry)" or ""))
+    ns.Print(("this character's prices are now recorded into %s."):format(self:RealmName(key)))
     ML:ShowRealm(key)
-    self:RecordNow("realm chosen", true)
+    self:RecordNow("auction house chosen", true)
     return key
 end
 
@@ -551,11 +568,9 @@ function Ledger:LiveSource()
     end
     local root = rawget(_G, "AUCTIONATOR_PRICE_DATABASE")
     if type(root) ~= "table" then return nil, key, "Auctionator isn't loaded, so there is nothing new to record." end
-    if not key then return nil, nil, "MendeLedger doesn't know which auction house this character uses yet. Use /mendel thisrealm <name>." end
-    local aKey = (type(Au) == "table" and type(Au.State) == "table" and type(Au.State.CurrentRealm) == "string")
-        and Au.State.CurrentRealm or key              -- Auctionator's own key, "" since the realm is hidden
-    local v = root[aKey]
-    if v == nil then v = root[key] end
+    if not key then return nil, nil, "MendeLedger doesn't know which auction house this character uses yet. Use /mendel use <name>." end
+    local aKey = self:AuctionatorKey()
+    local v = aKey ~= nil and root[aKey] or nil
     if type(v) == "table" then return v, key end
     if type(v) == "string" then
         local t = self:DecodeCBOR(v)
@@ -578,15 +593,24 @@ function Ledger:SourceProbe(Add)
         Add("Price database format", v == 8, ("version %s (written for 8)"):format(tostring(v or "?")))   -- RETEST
     end
     local key = self:CurrentRealmKey()
+    local region, regionSource = self:Region()
     local where = ({
-        game = "from the game: region, ruleset and faction",
+        game = "from the game",
         remembered = "remembered for this character",
-        realm = "the realm name (this client has no region and ruleset functions)",
-        rememberedRealm = "the realm remembered for this character",
-        only = "the only entry in the ledger",
-    })[self.realmSource or ""]
-    Add("Auction house", key ~= nil, key and (self:RealmName(key) .. ", " .. where)
-        or "unknown: use /mendel thisrealm <name>")
+        only = "the only auction house in the ledger",
+    })[self.houseSource or ""]
+    local detail
+    if key then
+        detail = self:RealmName(key) .. ", " .. where
+        if regionSource then detail = detail .. "; region from the " .. regionSource end
+        if self.regionMismatch then
+            detail = detail .. "; the region now reads " .. self.regionMismatch .. ", so the remembered one is kept"
+        end
+    else
+        detail = ("unknown (region %s, ruleset %s, faction %s); use /mendel use <name>"):format(
+            tostring(region or "?"), tostring(self.Ruleset() or "?"), tostring(self:Faction() or "?"))
+    end
+    Add("Auction house", key ~= nil, detail)
     local shared, other = self:AuctionatorShared(key)
     if key and shared then
         Add("Daily prices", true, ("from MendeLedger's own scans (Auctionator shares one price list with %s)"):format(self:RealmName(other)))
@@ -743,61 +767,83 @@ function Ledger:RecordNow(reason, silent)
     return true
 end
 
--- /mendel import: every realm Auctionator knows, all days (merging is idempotent)
+-- /mendel import: every Auctionator price list, all days (merging is idempotent),
+-- each into the auction house(s) it belongs to. Nothing is filed by realm.
 function Ledger:ImportAll(quiet)
     local root = rawget(_G, "AUCTIONATOR_PRICE_DATABASE")
     if type(root) ~= "table" then ns.Print("Auctionator isn't loaded, so there is nothing to import.") return end
     local liveSrc, liveKey = self:LiveSource()
-    local n, failed, skipped = 0, 0, 0
-    for key, v in pairs(root) do
-        -- since realm names are hidden, Auctionator files new prices under "":
-        -- those belong to this character's realm (skipped while it's unknown)
-        if key == "" then
-            -- the list Auctionator kept for everything after the hotfix: only safe
-            -- when exactly one of this account's auction houses used it
-            local owners = {}
-            for hk, h in pairs(ML.db.houses) do
-                if type(h.aKeys) == "table" and h.aKeys[""] then owners[#owners + 1] = hk end
-            end
-            if #owners == 1 then key = owners[1]
-            elseif #owners == 0 and liveKey and not self:AuctionatorShared(liveKey) then key = liveKey
-            elseif #owners == 0 and not liveKey then skipped = skipped + 1; key = nil
-            else key = nil end
-        else
-            -- Auctionator 350+'s "<ruleset> <faction>" lists belong to that auction
-            -- house in this account's region
-            local ruleset, faction = Ledger.ParseAuctionatorList(key)
-            if ruleset then
-                local region = self:Region() or (liveKey and liveKey:match("^(%a+)%-"))
-                key = region and (region .. "-" .. ruleset .. "-" .. faction) or nil
-            end
-        end
-        if type(key) == "string" and key ~= "__dbversion" then
-            local src
-            if key == liveKey and liveSrc then src = liveSrc
-            elseif type(v) == "table" then src = v
-            else src = self:DecodeCBOR(v) end
-            if src then
-                n = n + 1
-                self:Enqueue({ key = key, src = src, reason = "import", full = true, silent = quiet and true or false, current = key == liveKey })
+    local liveList = self:AuctionatorKey()
+    local region = (liveKey and liveKey:match(AH)) or self:Region()
+    local lists, failed, skipped, unplaced = 0, 0, 0, 0
+    for listKey, v in pairs(root) do
+        if type(listKey) == "string" and listKey ~= "__dbversion" then
+            local targets = {}
+            if liveKey and listKey == liveList then
+                targets[liveKey] = true                             -- this character's own list
+            elseif listKey == "" then
+                -- Auctionator's list for everything after the hotfix (before 350):
+                -- only when exactly one of this account's auction houses used it
+                local owners = {}
+                for hk, h in pairs(ML.db.houses) do
+                    if type(h.aKeys) == "table" and h.aKeys[""] then owners[#owners + 1] = hk end
+                end
+                if #owners == 1 then targets[owners[1]] = true
+                elseif #owners == 0 and liveKey and not self:AuctionatorShared(liveKey) then targets[liveKey] = true
+                elseif #owners == 0 and not liveKey then skipped = skipped + 1 end
             else
-                failed = failed + 1
+                local ruleset, faction = Ledger.ParseAuctionatorList(listKey)
+                if ruleset then
+                    -- Auctionator 350+'s "<ruleset> <faction>" lists: that auction house in this region
+                    if region then targets[region .. "-" .. ruleset .. "-" .. faction] = true end
+                else
+                    -- a list Auctionator filed under a realm name before Forever hid
+                    -- realms: into the account's auction houses with its region and ruleset
+                    local r, rs = Ledger.ParseOldKey(listKey)
+                    if r and rs then
+                        for hk in pairs(ML.db.houses) do
+                            local hr, hrs = hk:match(AH)
+                            if hr == r and hrs == rs then targets[hk] = true end
+                        end
+                        if liveKey then
+                            local lr, lrs = liveKey:match(AH)
+                            if lr == r and lrs == rs then targets[liveKey] = true end
+                        end
+                    end
+                    if not next(targets) then unplaced = unplaced + 1 end
+                end
+            end
+            if next(targets) then
+                local src
+                if liveKey and listKey == liveList and liveSrc then src = liveSrc
+                elseif type(v) == "table" then src = v
+                else src = self:DecodeCBOR(v) end
+                if src then
+                    lists = lists + 1
+                    for target in pairs(targets) do
+                        self:Enqueue({ key = target, src = src, reason = "import", full = true,
+                                       silent = quiet and true or false, current = target == liveKey })
+                    end
+                else
+                    failed = failed + 1
+                end
             end
         end
     end
     if skipped > 0 then self:RealmUnknownNotice() end
-    if n == 0 and failed == 0 then
-        if skipped == 0 then ns.Print("Auctionator has no prices saved yet.") end
+    if quiet then return end
+    if lists == 0 and failed == 0 then
+        if skipped == 0 then ns.Print("Auctionator has no prices saved that MendeLedger can place yet.") end
         return
     end
-    if quiet then return end
-    ns.Print(("importing %d price list%s from Auctionator%s."):format(n, n == 1 and "" or "s",
-        failed > 0 and (" (%d couldn't be unpacked on this client)"):format(failed) or ""))
+    ns.Print(("importing %d price list%s from Auctionator%s%s."):format(lists, lists == 1 and "" or "s",
+        failed > 0 and (" (%d couldn't be unpacked on this client)"):format(failed) or "",
+        unplaced > 0 and (" (%d older list%s waits for a character of its auction house)"):format(unplaced, unplaced == 1 and "" or "s") or ""))
 end
 
 function Ledger:Enqueue(req)
     for _, q in ipairs(self.queue) do
-        if q.key == req.key then
+        if q.key == req.key and q.src == req.src then
             q.src, q.full = req.src, q.full or req.full
             q.silent = q.silent and req.silent
             return
@@ -815,10 +861,6 @@ function Ledger:NextHarvest()
     local req = table.remove(self.queue, 1)
     if not req then return end
     local realm = self:Realm(req.key, true)
-    if req.current then
-        local name = Text(GetRealmName and ns.SafeCall(GetRealmName))
-        if name then realm.name = name end
-    end
     local today = ns.Today()
     local after = (not req.full) and realm.settled or nil
     local keys = {}
@@ -886,11 +928,6 @@ function Ledger:HarvestDone(job)
     end
     if not job.req.silent or (job.added > 0 and s.announce) then
         ns.Print(("%s: %s"):format(self:RealmName(job.key), self.status))
-    end
-    if not job.failed and job.updated > 0 and not Ledger.IsAuctionHouseKey(job.key) and type(realm.mergedInto) == "table" then
-        for houseKey in pairs(realm.mergedInto) do self.migrating[job.key .. ">" .. houseKey] = nil end
-        realm.mergedInto = {}                         -- an old realm got more (or corrected) history: pass it on again
-        if self.noted then self:MigrateLegacy(self.noted) end
     end
     if s.keepDays > 0 then self:Prune(job.key) end
     self:RefreshStats(job.key)
@@ -1338,7 +1375,7 @@ local function TooltipLines(id)
         local sellType = types and types.SellPrice                          -- RETEST
         for _, line in ipairs(data.lines) do
             if type(line) == "table" then
-                if sellType and line.type == sellType then break end
+                if sellType and Num(line.type) == sellType then break end
                 local left, right = Clean(line.leftText), Clean(line.rightText)
                 if left and RETRIEVING_TEXT and left == RETRIEVING_TEXT then return nil end
                 if left and StartsWith(left, SELL_PRICE_TEXT) then break end
@@ -1370,7 +1407,8 @@ end
 function Ledger:ReadTooltip(id, final)
     if self.tips[id] or tipFailed[id] then return self.tips[id] ~= nil end
     if not final and C_Item and C_Item.IsItemDataCachedByID then           -- RETEST
-        if ns.SafeCall(C_Item.IsItemDataCachedByID, id) == false then
+        local cached = ns.SafeCall(C_Item.IsItemDataCachedByID, id)
+        if not ns.IsSecret(cached) and cached == false then
             tipWanted[id] = true
             self:QueueName(id, false, true)
             return false
@@ -1511,12 +1549,12 @@ function Ledger:MakeEntry(key, s, e)
             e.typeName, e.cls = "Battle Pets", 17
             if C_PetJournal and C_PetJournal.GetPetInfoBySpeciesID then
                 local _, icon = ns.SafeCall(C_PetJournal.GetPetInfoBySpeciesID, e.id)
-                e.icon = icon
+                e.icon = Num(icon)
             end
         elseif e.id then
             local getInstant = (C_Item and C_Item.GetItemInfoInstant) or rawget(_G, "GetItemInfoInstant")   -- RETEST
             local _, itemType, itemSubType, equipLoc, icon, classID = ns.SafeCall(getInstant, e.id)
-            e.typeName, e.subName, e.icon, e.cls = Text(itemType), Text(itemSubType), icon, Num(classID)
+            e.typeName, e.subName, e.icon, e.cls = Text(itemType), Text(itemSubType), Num(icon), Num(classID)
             equipLoc = Text(equipLoc)
             e.slotName = equipLoc and Text(rawget(_G, equipLoc)) or nil   -- "INVTYPE_LEGS" -> "Legs"
         end

@@ -125,7 +125,7 @@ Click the gear tab on the right edge of the window.
 - **Keep Daily History**: Forever, 2 years, 1 year, 180 days or 90 days.
 - **Display**: show the minimap button; print a line in chat after each recording.
 - **Storage**: how much space your history uses.
-- **Auction Houses**: each one MendeLedger has prices for, shown as region / ruleset / faction. Click one to view its prices; **Forget** deletes its history (Auctionator's own data is not touched). **Use Here** is only needed if MendeLedger can't tell which auction house your character uses. Entries marked "old realm" hold prices from before version 0.2.7 (see Troubleshooting).
+- **Auction Houses**: each one MendeLedger has prices for, shown as region / ruleset / faction. Click one to view its prices; **Forget** deletes its history (Auctionator's own data is not touched). **Use Here** is only needed if MendeLedger can't tell which auction house your character uses. An entry marked "from before 0.2.7" holds older prices that haven't found their auction house yet (see Troubleshooting).
 - **Client**: shows which game features MendeLedger found. Useful when reporting a problem.
 
 ## Commands
@@ -136,9 +136,9 @@ Click the gear tab on the right edge of the window.
 | `/mendel <text>` | open the window and search (names, types, stats, effects or an item ID) |
 | `/mendel record` | record Auctionator's prices now |
 | `/mendel import` | record everything Auctionator has prices for |
-| `/mendel realms` | list the auction houses in your history |
-| `/mendel realm <name>` | show another auction house's prices |
-| `/mendel thisrealm <name>` | tell MendeLedger which auction house this character uses (only if it can't tell) |
+| `/mendel houses` | list the auction houses in your history |
+| `/mendel house <name>` | show another auction house's prices |
+| `/mendel use <name>` | tell MendeLedger which auction house this character uses (only if it can't tell) |
 | `/mendel keep <days or forever>` | how long to keep daily prices |
 | `/mendel scans on` / `off` | keep every Auctionator scan, or only daily prices |
 | `/mendel keepscans <7, 14 or 30>` | how many days of scan detail to keep |
@@ -168,17 +168,17 @@ Scan detail takes more. Scanning every 30 minutes all day can add about half a m
 
 **"No scans of this item in this range."** Scan detail only exists for scans made while MendeLedger was enabled. The daily view is shown instead.
 
-**How MendeLedger keeps auction houses apart.** WoW Forever has an auction house for each region (US, EU or Other), ruleset (PvE, PvP, RP, RP-PvP or Hardcore) and faction. MendeLedger reads these for each character and keeps a separate price history for each auction house, shown as, for example, US / PvE / Alliance. It matches Auctionator's own price lists one to one.
+**How MendeLedger keeps auction houses apart.** WoW Forever has no realms: there's an auction house for each region, ruleset and faction. MendeLedger reads these for each character and keeps a separate price history for each auction house, shown as, for example, US / PvE / Alliance. Regions are US, EU, KR/TW (Korea and Taiwan count as one for now) and CN; rulesets are PvE, PvP, RP and Hardcore. A character can't move to another region, so once MendeLedger knows a character's auction house, a different region reading later (for example after the region was changed at the login screen) doesn't move its history anywhere.
 
-**An entry marked "old realm" on the Options tab.** Versions before 0.2.7 filed prices under a realm name such as CAMWOW US1 Realm 3 PvE. The first time one of your characters logs in, that history (daily prices and scan detail) is moved into the auction house with the same region and ruleset, and chat says so. The old entry stays (marked "history moved") so a character of the other faction gets a copy too; once all your characters have logged in, you can **Forget** it. An entry named like "PvE Alliance" (made by version 0.2.7's Import All) is moved the same way and then removed on its own.
+**Prices from before version 0.2.7.** Older versions filed prices under realm names such as CAMWOW US1 Realm 3 PvE. When one of your characters logs in, that history (daily prices and scan detail) is moved into the auction house with the same region and ruleset, and into the other auction houses of that region and ruleset that MendeLedger already knows; then the old entry is removed, and chat says so. An entry named like "PvE Alliance" (made by version 0.2.7's Import All) is moved into its auction house the same way. A character of the other faction that hasn't logged in since version 0.2.7 starts without that older history.
 
-**The first login after updating takes a minute.** After updating to 0.2.9, MendeLedger moves scan detail out of old entries and reads Auctionator's price lists through once more, in the background. The line under the window's title shows the progress. Recording waits until it's done; nothing is lost.
+**The first login after updating takes a minute.** After updating from a version before 0.2.9, MendeLedger moves scan detail out of old entries and reads Auctionator's price lists through once more, in the background. The line under the window's title shows the progress. Recording waits until it's done; nothing is lost.
 
 **I play both factions, or more than one ruleset.** Auctionator 350 and later keep a separate price list for each ruleset and faction, and MendeLedger copies each one into the right auction house. Older Auctionator versions keep a single price list for everything since the WoW Forever update of November 20, 2026. With those, so that one auction house's prices never end up in another's history, MendeLedger records daily prices from its own scans for each auction house instead of copying Auctionator's list, and chat says so once. Updating Auctionator fixes this.
 
 **An item shows up twice, once with a suffix.** Items with random enchantments, such as "of the Bear" or "of the Eagle", are listed separately for each suffix (Auctionator 350 and later record them that way), as well as once without a suffix for all of them together.
 
-**MendeLedger asks which auction house you use.** This only happens if the game won't say (for example on a client without these functions). Open the **Options** tab, click the right entry under **Auction Houses** and press **Use Here**, or type `/mendel thisrealm <name>`. Nothing is lost while it waits: Auctionator keeps its last 21 days of prices.
+**MendeLedger asks which auction house you use.** This only happens if the game won't tell it your region, ruleset or faction. Open the **Options** tab, click the right entry under **Auction Houses** and press **Use Here**, or type `/mendel use <name>`; `/mendel probe` shows what was missing. Nothing is lost while it waits: Auctionator keeps its last 21 days of prices.
 
 **The minimap button is gone.** Type `/mendel minimap`.
 

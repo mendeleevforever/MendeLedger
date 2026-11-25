@@ -8,7 +8,7 @@ local addonName, ns = ...
 --     graph (daily low line, low-high band, quantity bars, hover for a day),
 --     a summary for the chosen range and the daily records
 --   * Options tab: recording, compression, how long to keep history, storage
---     used, realms in the ledger and a client capability check
+--     used, the auction houses in the ledger and a client capability check
 -- None of these frames are protected. The only protected UI MendeLedger
 -- touches is the Blizzard Settings panel, through ns.AfterCombat.
 
@@ -1985,17 +1985,17 @@ function ML:CreateOptionsView(f)
         ov.storage[i] = value
     end
 
-    ---------------------------------------------------------------- Realms
+    ---------------------------------------------------------------- Auction houses
     AddSection(ov, "Auction Houses", -206, OPT_RIGHT_X, -20)
     local forget = FlatButton(ov, "Forget", 58, 18)
     forget:SetPoint("TOPRIGHT", -20, -202)
     forget:SetScript("OnClick", function() ML:ConfirmForget(Ledger:ShownRealm()) end)
-    AddHoverTip(forget, "Forget", "Delete MendeLedger's history for the auction house (or old realm) being shown. Auctionator's own data is not touched.")
+    AddHoverTip(forget, "Forget", "Delete MendeLedger's history for the auction house being shown. Auctionator's own data is not touched.")
     local useHere = FlatButton(ov, "Use Here", 66, 18)
     useHere:SetPoint("TOPRIGHT", -84, -202)
     useHere:SetScript("OnClick", function()
         local key = Ledger:ShownRealm()
-        if key then Ledger:SetCharacterRealm(key) end
+        if key then Ledger:SetCharacterHouse(key) end
     end)
     AddHoverTip(useHere, "This character uses this auction house",
         "Only needed if MendeLedger can't tell on its own (it reads your region, ruleset and faction). Records this character's prices into the entry being shown.")
@@ -2027,12 +2027,12 @@ function ML:CreateOptionsView(f)
         end)
         return row
     end, function(row, r, idx)
-        row.item = r                                  -- the click handler needs to know the realm
+        row.item = r                                  -- the click handler needs to know the entry
         StripeRow(row, idx)
         row.selBar:SetShown(r.key == Ledger:ShownRealm())
         row.name:SetText(r.name)
-        local mine = ML.charDB and (ML.charDB.ah == r.key or (not ML.charDB.ah and ML.charDB.realm == r.key))
-        row.name:SetText(r.old and (r.name .. GREY .. "  (old realm)|r") or r.name)
+        local mine = ML.charDB and ML.charDB.ah == r.key
+        row.name:SetText(r.old and (r.name .. GREY .. "  (from before 0.2.7)|r") or r.name)
         row.info:SetText(("%s%s items  •  %s"):format(mine and "|cffffd100this character|r  •  " or
             (r.merged and (GREY .. "history moved|r  •  ") or ""), ns.Commas(r.items), ns.Ago(r.lastRecord)))
     end)
