@@ -3,10 +3,13 @@ local addonName, ns = ...
 -- The MendeLedger window, drawn in the same palette and layout as Looking For
 -- Work (dark window, layered gold trim, title plate on the top edge, icon tabs
 -- down the right-hand edge):
---   * Ledger tab: search box, Filter button and every recorded item grouped
+--   * Log tab: search box, Filter button and every recorded item grouped
 --     under collapsible item-type bars on the left; on the right, the price
 --     graph (daily low line, low-high band, quantity bars, hover for a day),
 --     a summary for the chosen range and the daily records
+--   * Ledger tab: your auction house sales, purchases and deposits, by day,
+--     week, month, quarter or year: a list of periods with their profit, a
+--     chart of the last twelve, the chosen period's totals and its records
 --   * Options tab: recording, compression, how long to keep history, storage
 --     used, the auction houses in the ledger and a client capability check
 -- None of these frames are protected. The only protected UI MendeLedger
@@ -33,6 +36,7 @@ local MAX_COLS      = 120                 -- more days than this are grouped int
 local DAY_ROW_H     = 20
 local RANGE_W       = 7 * 38 + 6 * 3
 local LEDGER_ICON   = 132763
+local BOOKS_ICON    = "Interface\\Icons\\INV_Misc_Coin_02"
 local OPTIONS_ICON  = "Interface\\Icons\\INV_Misc_Gear_01"
 local QUESTION      = "Interface\\Icons\\INV_Misc_QuestionMark"
 local OTHER         = "Other"
@@ -480,8 +484,9 @@ function ML:CreateMainFrame()
     self.frame = f
 
     self:CreateTabs(f)
-    self:CreateLedgerView(f)
+    self:CreateLogView(f)
     self:CreateOptionsView(f)
+    self:CreateBooksView(f)
 
     AddFooterRule(f, 46)
     f.legend = NoWrap(AddLabel(f, "", "GameFontNormalSmall", C.legend))
@@ -519,7 +524,7 @@ function ML:Open(tab)
 end
 
 function ML:OpenSearch(text)
-    self:Open("ledger")
+    self:Open("log")
     self.frame.search:SetText(ns.Trim(text or ""))
 end
 
@@ -549,7 +554,9 @@ function ML:RequestUIRefresh(delay, background, gap)
         refreshTimer = nil
         if not f:IsShown() then return end
         lastRefresh = GetTime()
-        if self.currentTab == "options" then self:RefreshOptions() else self:RefreshLedger() end
+        if self.currentTab == "options" then self:RefreshOptions()
+        elseif self.currentTab == "books" then self:RefreshBooks()
+        else self:RefreshLedger() end
         self:UpdateInfoLine()
     end)
 end
@@ -562,11 +569,11 @@ function ML:OnJobProgress()
     self:UpdateInfoLine()
     if self.currentTab == "options" then self:UpdateRecordingStatus() end
     local job = ns.CurrentJob()
-    if job and self.currentTab == "ledger" then
+    if job and self.currentTab == "log" then
         if job.name == "index" then
             -- no list rebuilds while the index fills: just show how far it is
             local done, total = job:Progress()
-            local lv = f.ledgerView
+            local lv = f.logView
             lv.listEmpty:SetText(("Reading the ledger... %d%%"):format(total > 0 and math.floor(done / total * 100) or 0))
             lv.listEmpty:Show()
         elseif job.name == "tooltips" and self.searchActive then
@@ -604,7 +611,8 @@ end
 -------------------------------------------------------------------------------
 local TAB_INFO = {
     options = { title = "Options", body = "Recording, compression, how long to keep history, storage and auction houses" },
-    ledger  = { title = "Ledger", body = "Search recorded items and graph their price history" },
+    log     = { title = "Log", body = "Search recorded items and graph their price history" },
+    books   = { title = "Ledger", body = "Your auction house sales, purchases and deposits: income, spending and profit by day, week, month, quarter and year" },
 }
 
 local function CreateTab(f, key, icon, y)
@@ -650,7 +658,9 @@ function ML:CreateTabs(f)
     local y = -22
     f.tabs.options = CreateTab(f, "options", OPTIONS_ICON, y)
     y = y - TAB - TAB_GAP - 8
-    f.tabs.ledger = CreateTab(f, "ledger", LEDGER_ICON, y)
+    f.tabs.log = CreateTab(f, "log", LEDGER_ICON, y)
+    y = y - TAB - TAB_GAP
+    f.tabs.books = CreateTab(f, "books", BOOKS_ICON, y)
 end
 
 function ML:UpdateTabs()
@@ -665,21 +675,25 @@ function ML:UpdateTabs()
     end
 end
 
+-- Tabs: "options", "log" (price history; older saved settings called it
+-- "ledger") and "books" (the Ledger tab: sales and purchases)
 function ML:SelectTab(key)
     local f = self:CreateMainFrame()
-    if key ~= "options" then key = "ledger" end
+    if key ~= "options" and key ~= "books" then key = "log" end
     self.currentTab = key
     self.db.settings.lastTab = key
     if self.dropList then self.dropList:Hide() end
     GameTooltip:Hide()
+    f.optionsView:SetShown(key == "options")
+    f.logView:SetShown(key == "log")
+    f.booksView:SetShown(key == "books")
     if key == "options" then
-        f.ledgerView:Hide()
-        f.optionsView:Show()
         f.legend:SetText(("MendeLedger %s"):format(ML.VERSION) .. DOT .. "Prices come from Auctionator's scans" .. DOT .. "/mendel help")
         self:RefreshOptions()
+    elseif key == "books" then
+        f.legend:SetText("Sales come from your mailbox" .. DOT .. "Commodity purchases are recorded as you buy" .. DOT .. "Open your mailbox to bring it up to date")
+        self:RefreshBooks()
     else
-        f.optionsView:Hide()
-        f.ledgerView:Show()
         f.legend:SetText("Click an item to graph it" .. DOT .. "Shift-click to link it" .. DOT .. "Hover the graph for each day's prices")
         self:RefreshLedger(true)
     end
@@ -688,14 +702,14 @@ function ML:SelectTab(key)
 end
 
 -------------------------------------------------------------------------------
--- Ledger view: header, item list, detail panel with the graph
+-- Log view (the price history): header, item list, detail panel with the graph
 -------------------------------------------------------------------------------
 local RANGES = { { 1, "24H" }, { 3, "3D" }, { 7, "7D" }, { 30, "30D" }, { 90, "90D" }, { 365, "1Y" }, { 0, "All" } }
 
-function ML:CreateLedgerView(f)
+function ML:CreateLogView(f)
     local lv = CreateFrame("Frame", nil, f)
     lv:SetAllPoints()
-    f.ledgerView = lv
+    f.logView = lv
 
     -- Header: item icon, name, type line, coverage bar and range buttons
     local iconBtn = CreateFrame("Button", nil, lv)
@@ -794,7 +808,7 @@ function ML:CreateLedgerView(f)
 end
 
 function ML:UpdateRangeButtons()
-    local lv = self.frame and self.frame.ledgerView
+    local lv = self.frame and self.frame.logView
     if not lv then return end
     for _, b in ipairs(lv.rangeButtons) do SetFlatSelected(b, b.days == self.db.settings.range) end
 end
@@ -1074,8 +1088,8 @@ end
 
 function ML:RefreshLedger(resetScroll)
     local f = self.frame
-    if not f or not f.ledgerView:IsShown() then return end
-    local lv = f.ledgerView
+    if not f or not f.logView:IsShown() then return end
+    local lv = f.logView
     local realmKey = Ledger:ShownRealm()
     if realmKey ~= self.listRealm then
         self.listRealm = realmKey
@@ -1128,7 +1142,7 @@ end
 function ML:SelectItem(key)
     self.selectedKey = key
     self.db.settings.lastItem = key
-    self.frame.ledgerView.itemList:Render()
+    self.frame.logView.itemList:Render()
     self:RefreshDetail()
 end
 
@@ -1438,7 +1452,7 @@ function ML:CreateGraph(d)
 end
 
 function ML:UpdateViewButton(S)
-    local b = self.frame.ledgerView.detail.graph.viewButton
+    local b = self.frame.logView.detail.graph.viewButton
     if not S or not S.short then b:Hide() return end
     b:Show()
     local scans = S.scansInRange or 0
@@ -1456,7 +1470,7 @@ function ML:UpdateViewButton(S)
 end
 
 function ML:DrawGraph(S, e)
-    local g = self.frame.ledgerView.detail.graph
+    local g = self.frame.logView.detail.graph
     local plot = g.plot
     local s = self.db.settings
     g.guide:Hide()
@@ -1665,7 +1679,7 @@ function ML:DrawGraph(S, e)
 end
 
 function ML:GraphHover(hit)
-    local g = self.frame.ledgerView.detail.graph
+    local g = self.frame.logView.detail.graph
     local col = hit.col
     if not col or not g.cols or not col.x then return end
     g.guide:ClearAllPoints()
@@ -1820,8 +1834,8 @@ end
 
 function ML:RefreshDetail()
     local f = self.frame
-    if not f or not f.ledgerView:IsShown() then return end
-    local lv, d = f.ledgerView, f.ledgerView.detail
+    if not f or not f.logView:IsShown() then return end
+    local lv, d = f.logView, f.logView.detail
     local realmKey = Ledger:ShownRealm()
     local idx = realmKey and Ledger.index[realmKey]
     local e = idx and self.selectedKey and idx.byKey[self.selectedKey] or nil
@@ -1902,6 +1916,436 @@ function ML:RefreshDetail()
     end
     d.dayList:SetData(rows, true)
     d.dayEmpty:SetText((e and #rows == 0) and "No records in this range." or "")
+end
+
+-------------------------------------------------------------------------------
+-- Ledger tab ("books"): auction house sales, purchases and deposits, totalled
+-- by day, week, month, quarter or year
+-------------------------------------------------------------------------------
+local BOOK_PERIODS = { { "day", "Day", "Days" }, { "week", "Week", "Weeks" }, { "month", "Month", "Months" },
+                       { "quarter", "Quarter", "Quarters" }, { "year", "Year", "Years" } }
+local BOOK_PERIOD_NAMES = { day = "Today", week = "This week", month = "This month", quarter = "This quarter", year = "This year" }
+local SCOPES = { "house", "char", "all" }
+local BAR_COLS = 12
+local CH_H = 150                                      -- chart height
+local GREEN, RED = { 0.35, 0.82, 0.35 }, { 0.92, 0.36, 0.3 }
+local KIND_NAMES = { sale = "Sold", buy = "Bought", deposit = "Deposit" }
+local KIND_COLORS = { sale = GREEN, buy = RED, deposit = C.muted }
+
+-- "+12g 50s" in green, "-3g" in red, "0" in grey
+local function SignedMoney(v)
+    v = v or 0
+    if v > 0 then return Hex(GREEN) .. "+" .. ns.PlainMoney(v) .. "|r" end
+    if v < 0 then return Hex(RED) .. "-" .. ns.PlainMoney(-v) .. "|r" end
+    return GREY .. "0|r"
+end
+
+local function TxItemName(r)
+    local name, q
+    if r.id then name, q = Ledger:ItemName(r.id) end
+    name = name or r.n or (r.id and ("Item " .. r.id)) or "?"
+    return name, q
+end
+
+function ML:CreateBooksView(f)
+    local bv = CreateFrame("Frame", nil, f)
+    bv:SetAllPoints()
+    bv:Hide()
+    f.booksView = bv
+
+    -- Header: icon, title, this period's totals, scope and period buttons
+    local icon = bv:CreateTexture(nil, "ARTWORK")
+    icon:SetSize(38, 38)
+    icon:SetPoint("TOPLEFT", 18, HEADER_Y + 1)
+    icon:SetTexture(BOOKS_ICON)
+    icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+    bv.title = NoWrap(AddLabel(bv, "Auction House Ledger", "GameFontNormalLarge", C.header))
+    bv.title:SetPoint("TOPLEFT", 66, HEADER_Y - 1)
+    bv.stats = NoWrap(AddLabel(bv, "", "GameFontNormalSmall", C.legend))
+    bv.stats:SetPoint("TOPRIGHT", -22, HEADER_Y - 4)
+    bv.stats:SetJustifyH("RIGHT")
+    bv.stats:SetWidth(470)
+
+    bv.scope = FlatButton(bv, "", 330, 18)
+    bv.scope:SetPoint("TOPLEFT", 66, HEADER_Y - 22)
+    bv.scope:SetScript("OnClick", function()
+        local s = ML.db.settings
+        local i = 1
+        for j, k in ipairs(SCOPES) do if k == s.booksScope then i = j end end
+        s.booksScope = SCOPES[i % #SCOPES + 1]
+        ML.booksSelected = nil
+        ML:RefreshBooks()
+    end)
+    AddHoverTip(bv.scope, "Whose sales and purchases",
+        "Click to switch between the auction house shown (all its characters), this character only, and everything you've recorded.")
+
+    bv.periodButtons = {}
+    local x = -20
+    for i = #BOOK_PERIODS, 1, -1 do
+        local p = BOOK_PERIODS[i]
+        local b = FlatButton(bv, p[2], 58, 18)
+        b:SetPoint("TOPRIGHT", x, HEADER_Y - 22)
+        x = x - 61
+        b.kind = p[1]
+        b:SetScript("OnClick", function(self)
+            ML.db.settings.booksPeriod = self.kind
+            ML.booksSelected = nil
+            ML:RefreshBooks()
+        end)
+        bv.periodButtons[p[1]] = b
+    end
+
+    -- Left panel: periods, newest first
+    AddFieldBox(bv, LEFT_X, CONTENT_TOP, -(W - LEFT_R), CONTENT_BOT)
+    bv.listTitle = AddLabel(bv, "", "GameFontNormal", C.header)
+    bv.listTitle:SetPoint("TOPLEFT", LEFT_X + 10, CONTENT_TOP - 9)
+    local profitHead = AddLabel(bv, "Profit", "GameFontNormalSmall", C.legend)
+    profitHead:SetPoint("TOPRIGHT", bv, "TOPLEFT", LEFT_R - 30, CONTENT_TOP - 11)
+    local scroll, child = MakeScroll("MendeLedgerPeriodScroll", bv, LIST_W)
+    scroll:SetPoint("TOPLEFT", LIST_X, LIST_TOP)
+    scroll:SetPoint("BOTTOMRIGHT", bv, "BOTTOMLEFT", LEFT_R - 24, CONTENT_BOT + 4)
+    bv.periodList = AttachVirtualList(scroll, child, ROW_H, function() return ML:MakePeriodRow(child) end,
+        function(row, p, idx) ML:FillPeriodRow(row, p, idx) end)
+    bv.listEmpty = AddLabel(bv, "", "GameFontNormal", C.muted)
+    bv.listEmpty:SetPoint("TOPLEFT", LIST_X + 10, LIST_TOP - 30)
+    bv.listEmpty:SetWidth(LIST_W - 20)
+    bv.listEmpty:SetJustifyH("CENTER")
+    if bv.listEmpty.SetSpacing then bv.listEmpty:SetSpacing(3) end
+
+    -- Right panel: chart, summary, records
+    AddFieldBox(bv, RIGHT_X, CONTENT_TOP, -16, CONTENT_BOT)
+    local d = CreateFrame("Frame", nil, bv)
+    d:SetPoint("TOPLEFT", RIGHT_X, CONTENT_TOP)
+    d:SetPoint("BOTTOMRIGHT", -16, CONTENT_BOT)
+    bv.detail = d
+
+    local ch = CreateFrame("Frame", nil, d)
+    ch:SetPoint("TOPLEFT", 12, -12)
+    ch:SetSize(GW, CH_H)
+    bv.chart = ch
+    ch.plot = CreateFrame("Frame", nil, ch)
+    ch.plot:SetPoint("TOPLEFT", PL, -PT)
+    ch.plot:SetPoint("BOTTOMRIGHT", -PR, PB)
+    ch.cols = {}
+    ch.zero = ch.plot:CreateTexture(nil, "ARTWORK", nil, 3)
+    ch.zero:SetColorTexture(C.gold[1], C.gold[2], C.gold[3], 0.7)
+    ch.zero:SetHeight(1)
+    ch.top = AddLabel(ch, "", "GameFontHighlightSmall", C.muted)
+    ch.top:SetPoint("TOPRIGHT", ch, "TOPLEFT", PL - 6, -PT + 6)
+    ch.mid = AddLabel(ch, "0", "GameFontHighlightSmall", C.muted)
+    ch.bottom = AddLabel(ch, "", "GameFontHighlightSmall", C.muted)
+    ch.bottom:SetPoint("BOTTOMRIGHT", ch, "BOTTOMLEFT", PL - 6, PB - 6)
+    ch.empty = AddLabel(ch, "", "GameFontNormal", C.muted)
+    ch.empty:SetPoint("CENTER", ch.plot, "CENTER", 0, 0)
+    local lx = PL
+    for _, item in ipairs({ { GREEN, "Income" }, { RED, "Spent" }, { C.goldLight, "Profit" } }) do
+        local sw = ch:CreateTexture(nil, "ARTWORK")
+        sw:SetSize(10, 10)
+        sw:SetPoint("TOPLEFT", ch, "BOTTOMLEFT", lx, -2)
+        sw:SetColorTexture(item[1][1], item[1][2], item[1][3], 0.9)
+        local t = AddLabel(ch, item[2], "GameFontHighlightSmall", C.legend)
+        t:SetPoint("LEFT", sw, "RIGHT", 4, 0)
+        lx = lx + 70
+    end
+
+    -- summary of the selected period
+    local y1 = -12 - CH_H - 26
+    bv.summaryTitle = AddSection(d, "", y1, 12, -12)
+    bv.sum = {}
+    local fields = { { "income", "Income from sales" }, { "spent", "Spent" }, { "profit", "Profit" }, { "purchases", "Purchases" },
+                     { "deposits", "Deposits paid" }, { "cut", "Auction house cut" }, { "sold", "Items sold" }, { "bought", "Items bought" } }
+    for i, fld in ipairs(fields) do
+        local col, rowN = (i - 1) % 2, math.floor((i - 1) / 2)
+        local lxx = 16 + col * 250
+        local y = y1 - 24 - rowN * 17
+        local label = AddLabel(d, fld[2], "GameFontNormalSmall", C.muted)
+        label:SetPoint("TOPLEFT", lxx, y)
+        local value = NoWrap(AddLabel(d, "", "GameFontHighlightSmall", C.text))
+        value:SetPoint("TOPRIGHT", d, "TOPLEFT", lxx + 232, y)
+        value:SetJustifyH("RIGHT")
+        bv.sum[fld[1]] = value
+    end
+
+    -- the period's sales, purchases and deposits
+    local y2 = y1 - 24 - 4 * 17 - 6
+    bv.txTitle = AddSection(d, "Sales, purchases and deposits", y2, 12, -12)
+    local heads = { { "When", 16, "LEFT" }, { "What", 104, "LEFT" }, { "Item", 162, "LEFT" } }
+    for _, hd in ipairs(heads) do
+        local t = AddLabel(d, hd[1], "GameFontNormalSmall", C.legend)
+        t:SetPoint("TOPLEFT", hd[2], y2 - 21)
+    end
+    local qh = AddLabel(d, "Qty", "GameFontNormalSmall", C.legend)
+    qh:SetPoint("TOPRIGHT", d, "TOPLEFT", 12 + 384, y2 - 21)
+    local th = AddLabel(d, "Gold", "GameFontNormalSmall", C.legend)
+    th:SetPoint("TOPRIGHT", d, "TOPRIGHT", -40, y2 - 21)
+    local tscroll, tchild = MakeScroll("MendeLedgerBooksScroll", d, DW - 48)
+    tscroll:SetPoint("TOPLEFT", 12, y2 - 38)
+    tscroll:SetPoint("BOTTOMRIGHT", d, "BOTTOMRIGHT", -36, 8)
+    bv.txList = AttachVirtualList(tscroll, tchild, DAY_ROW_H, function() return ML:MakeTxRow(tchild) end,
+        function(row, r, idx) ML:FillTxRow(row, r, idx) end)
+    bv.txEmpty = AddLabel(d, "", "GameFontNormalSmall", C.muted)
+    bv.txEmpty:SetPoint("TOPLEFT", 16, y2 - 44)
+    bv.txEmpty:SetWidth(DW - 40)
+    bv.txEmpty:SetJustifyH("LEFT")
+end
+
+local function PeriodTooltip(owner, p)
+    GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+    GameTooltip:AddLine(p.label, 1, 0.82, 0)
+    GameTooltip:AddDoubleLine("Income from sales", ns.PlainMoney(p.income), 0.75, 0.75, 0.75, GREEN[1], GREEN[2], GREEN[3])
+    GameTooltip:AddDoubleLine("Purchases", ns.PlainMoney(p.purchases), 0.75, 0.75, 0.75, RED[1], RED[2], RED[3])
+    GameTooltip:AddDoubleLine("Deposits paid", ns.PlainMoney(p.deposits), 0.75, 0.75, 0.75, RED[1], RED[2], RED[3])
+    GameTooltip:AddDoubleLine("Profit", SignedMoney(p.profit), 1, 1, 1, 1, 1, 1)
+    GameTooltip:AddLine(("%s sold, %s bought"):format(ns.Commas(p.sold), ns.Commas(p.bought)), 0.6, 0.6, 0.6)
+    GameTooltip:Show()
+end
+
+function ML:MakePeriodRow(parent)
+    local row = CreateFrame("Button", nil, parent)
+    row:SetSize(LIST_W, ROW_H)
+    row.sel = row:CreateTexture(nil, "BACKGROUND", nil, 2)
+    row.sel:SetAllPoints()
+    row.sel:SetColorTexture(C.goldLight[1], C.goldLight[2], C.goldLight[3], 0.2)
+    row.sel:Hide()
+    local hl = row:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetAllPoints()
+    hl:SetColorTexture(1, 0.9, 0.6, 0.1)
+    row.label = NoWrap(AddLabel(row, "", "GameFontHighlight", C.text))
+    row.label:SetPoint("LEFT", 8, 0)
+    row.label:SetWidth(LIST_W - 130)
+    row.value = NoWrap(AddLabel(row, "", "GameFontHighlightSmall", C.text))
+    row.value:SetPoint("RIGHT", -6, 0)
+    row.value:SetJustifyH("RIGHT")
+    row:SetScript("OnClick", function(self)
+        if self.item then ML.booksSelected = self.item.start; ML:RefreshBooks() end
+    end)
+    row:SetScript("OnEnter", function(self) if self.item then PeriodTooltip(self, self.item) end end)
+    row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    return row
+end
+
+function ML:FillPeriodRow(row, p, idx)
+    row.item = p
+    StripeRow(row, idx)
+    row.label:SetText(p.label)
+    row.value:SetText(SignedMoney(p.profit))
+    row.sel:SetShown(p.start == self.booksSelected)
+end
+
+function ML:MakeTxRow(parent)
+    local row = CreateFrame("Button", nil, parent)
+    row:SetSize(DW - 48, DAY_ROW_H)
+    local hl = row:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetAllPoints()
+    hl:SetColorTexture(1, 0.9, 0.6, 0.1)
+    row.when = NoWrap(AddLabel(row, "", "GameFontHighlightSmall", C.text))
+    row.when:SetPoint("LEFT", 4, 0)
+    row.kind = NoWrap(AddLabel(row, "", "GameFontHighlightSmall", C.text))
+    row.kind:SetPoint("LEFT", 92, 0)
+    row.name = NoWrap(AddLabel(row, "", "GameFontHighlightSmall", C.text))
+    row.name:SetPoint("LEFT", 150, 0)
+    row.name:SetWidth(180)
+    row.qty = NoWrap(AddLabel(row, "", "GameFontHighlightSmall", C.text))
+    row.qty:SetPoint("RIGHT", row, "LEFT", 384, 0)
+    row.qty:SetJustifyH("RIGHT")
+    row.gold = NoWrap(AddLabel(row, "", "GameFontHighlightSmall", C.text))
+    row.gold:SetPoint("RIGHT", -4, 0)
+    row.gold:SetJustifyH("RIGHT")
+    row:SetScript("OnClick", function(self)
+        local r = self.item
+        if not r or not r.id then return end
+        local e = { id = r.id, key = tostring(r.id), kind = "item" }
+        if IsModifiedClick and IsModifiedClick() then ML:LinkItem(e) return end
+        -- show its price history on the Log tab, in the auction house it was traded in
+        if r.h and Ledger:Realm(r.h) and r.h ~= Ledger:ShownRealm() then ML.db.settings.realm = r.h end
+        ML.selectedKey = e.key
+        ML.db.settings.lastItem = e.key               -- kept if the Log tab starts fresh
+        ML:SelectTab("log")
+    end)
+    row:SetScript("OnEnter", function(self) if self.item then ML:TxTooltip(self, self.item) end end)
+    row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    return row
+end
+
+function ML:FillTxRow(row, r, idx)
+    row.item = r
+    StripeRow(row, idx)
+    row.when:SetText(("%s %s"):format(date("%b %d", r.t), ns.TimeLabel(r.t)))
+    row.kind:SetText(Hex(KIND_COLORS[r.k] or C.text) .. (KIND_NAMES[r.k] or r.k) .. "|r")
+    local name, q = TxItemName(r)
+    row.name:SetText(name)
+    SetColor(row.name, q and QualityRGB(q) or C.text)
+    row.qty:SetText(r.q and ns.Commas(r.q) or "")
+    if r.k == "sale" then row.gold:SetText(SignedMoney(r.m or 0))
+    else row.gold:SetText(SignedMoney(-(r.g or 0))) end
+end
+
+function ML:TxTooltip(owner, r)
+    GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+    local name = TxItemName(r)
+    GameTooltip:AddLine(("%s: %s"):format(KIND_NAMES[r.k] or r.k, name), 1, 0.82, 0)
+    GameTooltip:AddLine(("%s at %s"):format(date("%A, %B %d, %Y", r.t), ns.TimeLabel(r.t)), 0.75, 0.75, 0.75)
+    if r.q then GameTooltip:AddDoubleLine("Quantity", ns.Commas(r.q), 0.75, 0.75, 0.75, 1, 1, 1) end
+    if r.k == "sale" then
+        GameTooltip:AddDoubleLine("Sale price", ns.PlainMoney(r.g or 0), 0.75, 0.75, 0.75, 1, 1, 1)
+        if r.q and r.q > 1 and r.g then GameTooltip:AddDoubleLine("Each", ns.PlainMoney(math.floor(r.g / r.q)), 0.75, 0.75, 0.75, 1, 1, 1) end
+        GameTooltip:AddDoubleLine("Auction house cut", ns.PlainMoney(r.c or 0), 0.75, 0.75, 0.75, 1, 1, 1)
+        GameTooltip:AddDoubleLine("Deposit returned", ns.PlainMoney(r.d or 0), 0.75, 0.75, 0.75, 1, 1, 1)
+        GameTooltip:AddDoubleLine("Gold received", ns.PlainMoney(r.m or 0), 0.75, 0.75, 0.75, GREEN[1], GREEN[2], GREEN[3])
+    elseif r.k == "buy" then
+        GameTooltip:AddDoubleLine("Price paid", ns.PlainMoney(r.g or 0), 0.75, 0.75, 0.75, RED[1], RED[2], RED[3])
+        if r.q and r.q > 1 and r.g then GameTooltip:AddDoubleLine("Each", ns.PlainMoney(math.floor(r.g / r.q)), 0.75, 0.75, 0.75, 1, 1, 1) end
+    else
+        GameTooltip:AddDoubleLine("Deposit", ns.PlainMoney(r.g or 0), 0.75, 0.75, 0.75, RED[1], RED[2], RED[3])
+    end
+    GameTooltip:AddDoubleLine("Character", ns.Books:CharacterName(r.ch), 0.75, 0.75, 0.75, 1, 1, 1)
+    if r.h then GameTooltip:AddDoubleLine("Auction house", Ledger:RealmName(r.h), 0.75, 0.75, 0.75, 1, 1, 1) end
+    GameTooltip:AddLine(r.src == "mail" and "From your mailbox" or "Recorded at the auction house", 0.5, 0.5, 0.5)
+    if r.id then GameTooltip:AddLine("Click to see its price history on the Log tab", 0.5, 0.5, 0.5) end
+    GameTooltip:Show()
+end
+
+-- The last BAR_COLS periods, oldest on the left: income up in green,
+-- spending down in red, profit as a gold mark
+function ML:DrawBooksChart(periods)
+    local bv = self.frame.booksView
+    local ch, plot = bv.chart, bv.chart.plot
+    local cols = {}
+    for i = math.min(BAR_COLS, #periods), 1, -1 do cols[#cols + 1] = periods[i] end
+    local pw, ph = GW - PL - PR, CH_H - PT - PB
+    local half = ph / 2
+    local maxV = 1
+    for _, p in ipairs(cols) do maxV = math.max(maxV, p.income, p.spent, math.abs(p.profit)) end
+    local scale = half / maxV
+    ch.zero:ClearAllPoints()
+    ch.zero:SetPoint("LEFT", plot, "TOPLEFT", 0, -half)
+    ch.zero:SetPoint("RIGHT", plot, "TOPRIGHT", 0, -half)
+    ch.mid:ClearAllPoints()
+    ch.mid:SetPoint("RIGHT", plot, "TOPLEFT", -6, -half)
+    ch.top:SetText(#cols > 0 and ns.AxisMoney(maxV) or "")
+    ch.bottom:SetText(#cols > 0 and ("-" .. ns.AxisMoney(maxV)) or "")
+    ch.mid:SetShown(#cols > 0)
+    ch.empty:SetText(#cols == 0 and "Nothing to chart yet" or "")
+    local slot = pw / BAR_COLS
+    local left = pw - #cols * slot                    -- the newest period sits at the right edge
+    local bw = math.min(22, slot * 0.6)
+    local every = (#cols > 8) and 2 or 1
+    for i, p in ipairs(cols) do
+        local c = ch.cols[i]
+        if not c then
+            c = {}
+            c.sel = plot:CreateTexture(nil, "BACKGROUND", nil, 1)
+            c.sel:SetColorTexture(C.goldLight[1], C.goldLight[2], C.goldLight[3], 0.12)
+            c.inc = plot:CreateTexture(nil, "ARTWORK", nil, 1)
+            c.inc:SetColorTexture(GREEN[1], GREEN[2], GREEN[3], 0.85)
+            c.out = plot:CreateTexture(nil, "ARTWORK", nil, 1)
+            c.out:SetColorTexture(RED[1], RED[2], RED[3], 0.85)
+            c.mark = plot:CreateTexture(nil, "OVERLAY")
+            c.mark:SetColorTexture(C.goldLight[1], C.goldLight[2], C.goldLight[3], 1)
+            c.label = AddLabel(ch, "", "GameFontHighlightSmall", C.muted)
+            c.hit = CreateFrame("Button", nil, plot)
+            c.hit:SetScript("OnEnter", function(self) if self.period then PeriodTooltip(self, self.period) end end)
+            c.hit:SetScript("OnLeave", function() GameTooltip:Hide() end)
+            c.hit:SetScript("OnClick", function(self)
+                if self.period then ML.booksSelected = self.period.start; ML:RefreshBooks() end
+            end)
+            ch.cols[i] = c
+        end
+        local x0 = left + (i - 1) * slot
+        local cx = x0 + (slot - bw) / 2
+        c.sel:ClearAllPoints()
+        c.sel:SetPoint("TOPLEFT", plot, "TOPLEFT", x0 + 1, 0)
+        c.sel:SetSize(slot - 2, ph)
+        c.sel:SetShown(p.start == self.booksSelected)
+        local hi = math.max(p.income > 0 and 1 or 0, p.income * scale)
+        c.inc:ClearAllPoints()
+        c.inc:SetPoint("BOTTOMLEFT", plot, "TOPLEFT", cx, -half)
+        c.inc:SetSize(bw, math.max(0.01, hi))
+        c.inc:SetShown(hi > 0)
+        local lo = math.max(p.spent > 0 and 1 or 0, p.spent * scale)
+        c.out:ClearAllPoints()
+        c.out:SetPoint("TOPLEFT", plot, "TOPLEFT", cx, -half)
+        c.out:SetSize(bw, math.max(0.01, lo))
+        c.out:SetShown(lo > 0)
+        c.mark:ClearAllPoints()
+        c.mark:SetSize(bw + 6, 3)
+        c.mark:SetPoint("CENTER", plot, "TOPLEFT", cx + bw / 2, -half + p.profit * scale)
+        c.mark:Show()
+        c.label:ClearAllPoints()
+        c.label:SetPoint("TOP", plot, "BOTTOMLEFT", x0 + slot / 2, -4)
+        c.label:SetText(((#cols - i) % every == 0) and (p.short or "") or "")
+        c.label:Show()
+        c.hit:ClearAllPoints()
+        c.hit:SetPoint("TOPLEFT", plot, "TOPLEFT", x0, 0)
+        c.hit:SetSize(slot, ph)
+        c.hit.period = p
+        c.hit:Show()
+    end
+    for i = #cols + 1, #ch.cols do
+        local c = ch.cols[i]
+        c.sel:Hide(); c.inc:Hide(); c.out:Hide(); c.mark:Hide(); c.label:Hide(); c.hit:Hide(); c.hit.period = nil
+    end
+end
+
+function ML:RefreshBooks()
+    local f = self.frame
+    if not f or not f.booksView or not f.booksView:IsShown() then return end
+    local bv, s = f.booksView, self.db.settings
+    local Books = ns.Books
+    local kind, scope = s.booksPeriod, s.booksScope
+    local house = Ledger:ShownRealm()
+    local periods = Books:Summaries(kind, scope, house)
+    bv.periods = periods
+
+    for k, b in pairs(bv.periodButtons) do SetFlatSelected(b, k == kind) end
+    local scopeText
+    if scope == "char" then
+        scopeText = "This character (" .. Books:CharacterName(Books:Character()) .. ")"
+    elseif scope == "all" then
+        scopeText = "Everything: all auction houses and characters"
+    else
+        scopeText = (house and Ledger:RealmName(house) or "No auction house yet") .. ", all characters"
+    end
+    bv.scope.label:SetText(scopeText .. "  |cffffd100>|r")
+
+    local cur = Books:Current(kind, scope, house)
+    bv.stats:SetText(("%s:  income %s" .. DOT .. "spent %s" .. DOT .. "profit %s"):format(BOOK_PERIOD_NAMES[kind] or "",
+        ns.PlainMoney(cur.income), ns.PlainMoney(cur.spent), SignedMoney(cur.profit)))
+
+    local selected
+    for _, p in ipairs(periods) do if p.start == self.booksSelected then selected = p end end
+    if not selected then
+        selected = periods[1]
+        self.booksSelected = selected and selected.start or nil
+    end
+    for _, p in ipairs(BOOK_PERIODS) do if p[1] == kind then bv.listTitle:SetText(p[3]) end end
+    bv.periodList:SetData(periods)
+    if #periods == 0 then
+        local lines = { "Nothing recorded yet." }
+        if not s.recordBooks then
+            lines[#lines + 1] = "Recording sales and purchases is turned off on the Options tab."
+        else
+            lines[#lines + 1] = "Sales and item purchases are read from your mailbox when you open it; commodity purchases and deposits are recorded at the auction house."
+        end
+        bv.listEmpty:SetText(table.concat(lines, "\n\n"))
+        bv.listEmpty:Show()
+    else
+        bv.listEmpty:Hide()
+    end
+
+    self:DrawBooksChart(periods)
+    local p = selected
+    bv.summaryTitle:SetText(p and p.label or "Summary")
+    bv.sum.income:SetText(p and ns.PlainMoney(p.income) or "—")
+    bv.sum.spent:SetText(p and ns.PlainMoney(p.spent) or "—")
+    bv.sum.profit:SetText(p and SignedMoney(p.profit) or "—")
+    bv.sum.purchases:SetText(p and ns.PlainMoney(p.purchases) or "—")
+    bv.sum.deposits:SetText(p and ns.PlainMoney(p.deposits) or "—")
+    bv.sum.cut:SetText(p and ns.PlainMoney(p.cut) or "—")
+    bv.sum.sold:SetText(p and ns.Commas(p.sold) or "—")
+    bv.sum.bought:SetText(p and ns.Commas(p.bought) or "—")
+    bv.txList:SetData(p and p.tx or {}, true)
+    bv.txEmpty:SetText(p and "" or "Sales, purchases and deposits of the period you pick appear here.")
 end
 
 -------------------------------------------------------------------------------
@@ -2014,6 +2458,9 @@ function ML:CreateOptionsView(f)
     ov.announceCheck = MakeCheck(ov, 18, -514, "Print a line in chat after each recording", "Recording messages",
         "When a recording adds daily prices, one line in chat says how many. Scans and recordings that find nothing new stay quiet.",
         function(on) ML.db.settings.announce = on end)
+    ov.booksCheck = MakeCheck(ov, 18, -538, "Record my sales and purchases (Ledger tab)", "Ledger tab",
+        "Reads \"Auction successful\" and \"Auction won\" mail when you open your mailbox, and records commodity purchases and deposits at the auction house. MendeLedger never takes mail, gold or items.",
+        function(on) ML.db.settings.recordBooks = on end)
 
     ---------------------------------------------------------------- Storage
     AddSection(ov, "Storage", -46, OPT_RIGHT_X, -20)
@@ -2042,7 +2489,7 @@ function ML:CreateOptionsView(f)
     end)
     AddHoverTip(useHere, "This character uses this auction house",
         "Only needed if MendeLedger can't tell on its own (it reads your region, ruleset and faction). Records this character's prices into the entry being shown.")
-    local rhint = AddLabel(ov, "Region / ruleset / faction. Click one to show it in the Ledger tab.", nil, C.muted)
+    local rhint = AddLabel(ov, "Region / ruleset / faction. Click one to show it in the Log tab.", nil, C.muted)
     rhint:SetPoint("TOPLEFT", OPT_RIGHT_X + 2, -230)
     local rscroll, rchild = MakeScroll("MendeLedgerRealmScroll", ov, RW - 24)
     rscroll:SetPoint("TOPLEFT", OPT_RIGHT_X, -248)
@@ -2066,7 +2513,7 @@ function ML:CreateOptionsView(f)
         hl:SetAllPoints()
         hl:SetColorTexture(C.goldLight[1], C.goldLight[2], C.goldLight[3], 0.16)
         row:SetScript("OnClick", function(self)
-            if self.item then ML:ShowRealm(self.item.key); ML:SelectTab("ledger") end
+            if self.item then ML:ShowRealm(self.item.key); ML:SelectTab("log") end
         end)
         return row
     end, function(row, r, idx)
@@ -2143,6 +2590,7 @@ function ML:RefreshOptions()
     ov.compressCheck:SetChecked(s.compress)
     ov.minimapCheck:SetChecked(not self.db.minimap.hide)
     ov.announceCheck:SetChecked(s.announce)
+    ov.booksCheck:SetChecked(s.recordBooks)
     ov.method:SetText(Ledger:CanCompress() and ("Method: " .. Ledger.compressMethod)
         or (GREY .. "Deflate isn't available on this client, so history is packed but not compressed.|r"))
     for _, b in ipairs(ov.keepButtons) do SetFlatSelected(b, b.days == s.keepDays) end
@@ -2272,6 +2720,11 @@ local function AddShortcutTooltip(tooltip)
     if realm then
         tooltip:AddLine(("%s: %s items, recorded %s"):format(Ledger:RealmName(key), ns.Commas(realm.stats and realm.stats.items or 0),
             ns.Ago(realm.lastRecord)), C.muted[1], C.muted[2], C.muted[3])
+    end
+    if ML.db and ns.Books and #ML.db.books.tx > 0 then
+        local today = ns.Books:Current("day", "char")
+        tooltip:AddLine(("Today: %s profit (income %s, spent %s)"):format(SignedMoney(today.profit), ns.PlainMoney(today.income),
+            ns.PlainMoney(today.spent)), C.muted[1], C.muted[2], C.muted[3])
     end
 end
 

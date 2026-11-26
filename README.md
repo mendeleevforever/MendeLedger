@@ -1,8 +1,8 @@
 # MendeLedger
 
-A GUI for seeing Auctionator price history.
+A GUI for seeing Auctionator price history, and a ledger of your own auction house sales and purchases.
 
-Auctionator only remembers the last 21 days of prices (by default). MendeLedger keeps every day Auctionator scans, so you can look up an item's price history over months instead of weeks, and graph how it moves, even hour by hour.
+Auctionator only remembers the last 21 days of prices (by default). MendeLedger keeps every day Auctionator scans, so you can look up an item's price history over months instead of weeks, and graph how it moves, even hour by hour. Its Ledger tab keeps track of what you sell and buy on the auction house, and how much gold you make and spend, by day, week, month, quarter and year.
 
 ## Features
 
@@ -14,6 +14,7 @@ Auctionator only remembers the last 21 days of prices (by default). MendeLedger 
 - Find items you can buy on the auction house for less than a vendor pays for them
 - Find gear worth more disenchanted than it costs on the auction house
 - Shift-click an item to link it in chat
+- A ledger of your auction house sales, purchases and deposits, with income, spending and profit by day, week, month, quarter and year
 - Keeps each auction house separate: region, ruleset and faction (for example US / PvE / Alliance)
 - Import the prices your other characters have scanned
 - Minimap button and an entry in the addon compartment
@@ -62,6 +63,10 @@ Good to know:
 
 ## The window
 
+The tabs on the right edge of the window: **Options** (the gear), **Log** (price history) and **Ledger** (your sales and purchases).
+
+### Log tab
+
 **Left side**
 - Search box: finds items by name, item type and anything in their tooltip (see Searching below). With the search box selected, shift-click an item in your bags to search for it.
 - **Filter**: sort by name, latest price, 7-day change, vendor profit, disenchant profit or days recorded; search item tooltips or only names and types; show only items seen in the last 7 days or with 2 or more days of prices; group by item type; expand or collapse all item types.
@@ -77,6 +82,28 @@ Good to know:
 - **Daily Records** (or **Scans** in scan view): every day or scan in the range, newest first.
 
 The bar above the graph shows on how many days the item has been recorded since it was first seen.
+
+### Ledger tab
+
+Your own auction house business: what you sold and bought, for how much and when.
+
+- **Day**, **Week**, **Month**, **Quarter** and **Year** choose how it's totalled. Weeks start on Monday.
+- The button beside them switches between the auction house shown (all your characters there), this character only, and everything.
+- **Left side**: every period with sales or purchases, newest first, with its profit. Click one to see it.
+- **Right side**:
+  - A chart of the last twelve periods: income in green (up), spending in red (down) and profit as a gold mark. Hover a column for its totals, click it to see it.
+  - **Summary** of the chosen period: income from sales, spent, profit, purchases, deposits paid, the auction house's cut, items sold and items bought.
+  - Every sale, purchase and deposit in the period, newest first, with time, item, quantity and gold. Hover one for its details (sale price, cut, deposit returned, gold received, character); click it to see the item's price history on the Log tab, or shift-click to link it.
+
+How it's counted:
+- **Income** is the gold you receive from sales: the sale price, minus the auction house's cut, plus the deposit you get back.
+- **Spent** is what you pay for purchases plus the deposits you pay when you post auctions.
+- **Profit** is income minus spent. A deposit lost on an auction that expired or was cancelled counts against your profit.
+
+Where the records come from:
+- **Sales** and **purchases of items** come from your mailbox ("Auction successful" and "Auction won" mail). They're recorded when you open your mailbox, at the time the mail arrived. MendeLedger only reads your mail: it never takes gold, items or mail.
+- **Purchases of commodities** (ores, herbs, cloth and other stackable goods) go straight into your bags without mail, so they're recorded at the auction house when you buy them.
+- **Deposits** are recorded when you post an auction.
 
 ## Searching
 
@@ -123,7 +150,7 @@ Click the gear tab on the right edge of the window.
 - **Scan Detail**: keep every Auctionator scan, and for how long (7, 14 or 30 days).
 - **Compression**: saves disk space. It's best to leave it on.
 - **Keep Daily History**: Forever, 2 years, 1 year, 180 days or 90 days.
-- **Display**: show the minimap button; print a line in chat after each recording.
+- **Display**: show the minimap button; print a line in chat after each recording; record your sales and purchases for the Ledger tab.
 - **Storage**: how much space your history uses. The figures are measured when you open this tab, so they can take a few seconds to update.
 - **Auction Houses**: each one MendeLedger has prices for, shown as region / ruleset / faction. Click one to view its prices; **Forget** deletes its history (Auctionator's own data is not touched). **Use Here** is only needed if MendeLedger can't tell which auction house your character uses. An entry marked "from before 0.2.7" holds older prices that haven't found their auction house yet (see Troubleshooting).
 - **Client**: shows which game features MendeLedger found. Useful when reporting a problem.
@@ -133,6 +160,8 @@ Click the gear tab on the right edge of the window.
 | Command | What it does |
 |---|---|
 | `/mendel` | open or close the window |
+| `/mendel log` | open the Log tab (price history) |
+| `/mendel ledger` | open the Ledger tab (your sales and purchases) |
 | `/mendel <text>` | open the window and search (names, types, stats, effects or an item ID) |
 | `/mendel record` | record Auctionator's prices now |
 | `/mendel import` | record everything Auctionator has prices for |
@@ -185,6 +214,10 @@ Scan detail takes more. Scanning every 30 minutes all day can add about half a m
 **The minimap button is gone.** Type `/mendel minimap`.
 
 **The window is off the screen.** Type `/mendel reset`.
+
+**A sale is missing from the Ledger tab.** Sales are recorded when you open your mailbox, so open it once after selling. Mail you took before installing version 0.4.0 can't be read any more. Commodity purchases and deposits are only recorded while MendeLedger is enabled.
+
+**The time of a sale is when its mail arrived.** That's normally the moment it sold; a sale whose gold is held back for a while shows when the gold arrived.
 
 **Something stopped working after a game or Auctionator update.** Type `/mendel probe` and include what it shows when you report the problem on the CurseForge page, along with your MendeLedger and Auctionator versions.
 

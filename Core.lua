@@ -10,10 +10,13 @@ local addonName, ns = ...
 -- out-of-combat queue, the background job runner, the capability probe and
 -- the /mendel command.
 --
--- The only unit data MendeLedger reads is for the auction house (Ledger.lua):
--- UnitFactionGroup("player"), and UnitGUID("player") passed straight to
--- C_BattleNet.GetGameAccountInfoByGUID for the region (never compared, parsed
--- or stored). It never reads health, power or names, the combat log or secure
+-- The only unit data MendeLedger reads is about the player:
+--   * UnitFactionGroup("player") and UnitGUID("player") (passed straight to
+--     C_BattleNet.GetGameAccountInfoByGUID) for the auction house (Ledger.lua)
+--   * UnitGUID("player") as a whole string, as the key of the account-wide
+--     character table, and UnitName("player") shown beside it (Books.lua);
+--     the GUID is never parsed, and a secret name is simply not stored
+-- It never reads health or power, other units, the combat log or secure
 -- snippets, and never keys anything by realm. Values from game APIs (faction,
 -- region, rules, item names, links, settings, build info) go through
 -- ns.Text / ns.Num / ns.IsSecret, which drop Midnight "secret" values before
@@ -26,7 +29,7 @@ local ML = {}
 ns.ML = ML
 _G.MendeLedger = ML
 
-ML.VERSION          = "0.3.1"
+ML.VERSION          = "0.4.0"
 ML.TESTED_INTERFACE = 16001                                   -- RETEST: the build this was written against
 ML.PREFIX           = "|cffe6b422MendeLedger:|r "
 
@@ -232,6 +235,9 @@ ns.DEFAULTS = {
         recordScans = true,       -- keep every Auctionator scan (prices by time of day)
         keepScanDays = 14,        -- how long scan detail is kept (7, 14 or 30)
         useScans    = true,       -- ranges up to 7 days show every scan when there is scan detail
+        recordBooks = true,       -- Ledger tab: record auction house sales, purchases and deposits
+        booksPeriod = "month",    -- day | week | month | quarter | year
+        booksScope  = "house",    -- house (the auction house shown) | char (this character) | all
         range       = 30,         -- graph range in days, 0 = all
         showQty     = true,
         showBand    = true,
@@ -250,6 +256,8 @@ ns.DEFAULTS = {
     realms      = {},             -- [auction house key, e.g. "US-PvE-Alliance", or an old realm key] = { items = ..., ... }
     houses      = {},             -- [auction house key] = { seen, aKey = Auctionator's list now, aKeys = every list it used }
     catchUp     = 0,              -- 1 once the 0.2.9 one-time re-read of Auctionator's lists has run
+    books       = { tx = {}, seen = {} },   -- Ledger tab: sales, purchases, deposits; mail already counted
+    characters  = {},             -- [UnitGUID("player")] = { name, ah, seen } for the Ledger tab
 }
 
 local function Copy(v)
@@ -306,6 +314,21 @@ function ML:InitDB()
     end
     for k, v in pairs(db.names) do
         if type(v) ~= "string" then db.names[k] = nil end
+    end
+    -- Ledger tab records: drop anything malformed
+    local books = db.books
+    if type(books.tx) ~= "table" then books.tx = {} end
+    if type(books.seen) ~= "table" then books.seen = {} end
+    for i = #books.tx, 1, -1 do
+        local r = books.tx[i]
+        if type(r) ~= "table" or type(r.t) ~= "number" or (r.k ~= "sale" and r.k ~= "buy" and r.k ~= "deposit") then table.remove(books.tx, i) end
+    end
+    for i = #books.seen, 1, -1 do
+        local m = books.seen[i]
+        if type(m) ~= "table" or type(m.s) ~= "string" or type(m.t) ~= "number" then table.remove(books.seen, i) end
+    end
+    for k, c in pairs(db.characters) do
+        if type(k) ~= "string" or type(c) ~= "table" then db.characters[k] = nil end
     end
     for k, h in pairs(db.houses) do
         if type(k) ~= "string" or type(h) ~= "table" then db.houses[k] = nil
@@ -472,26 +495,32 @@ function ns.Probe()
 
     local build, _, _, iface = GetBuildInfo()                  -- RETEST
     iface, build = ns.Num(iface), ns.Text(build)
-    Add("Interface", iface == ML.TESTED_INTERFACE,
-        ("%s (build %s; written for %d)"):format(tostring(iface or "?"), build or "?", ML.TESTED_INTERFACE))
-
-    local proj = ns.Num(rawget(_G, "WOW_PROJECT_ID"))          -- RETEST: informational only
-    local projName = "unknown"
+    local proj = ns.Num(rawget(_G, "WOW_PROJECT_ID"))          -- RETEST: shown only, never used to choose behaviour
+    local projName = "?"
     if proj then
-        if proj == rawget(_G, "WOW_PROJECT_CAMELOT") then projName = "Forever (Camelot)"
+        if proj == rawget(_G, "WOW_PROJECT_CAMELOT") then projName = "Forever"
         elseif proj == rawget(_G, "WOW_PROJECT_MAINLINE") then projName = "Mainline"
         elseif proj == rawget(_G, "WOW_PROJECT_CLASSIC") then projName = "Classic" end
     end
-    Add("Game type", true, ("%s = %s (shown only, never used to choose behaviour)"):format(tostring(proj or "?"), projName))
+    Add("Interface", iface == ML.TESTED_INTERFACE,
+        ("%s (build %s; written for %d); project %s = %s"):format(tostring(iface or "?"), build or "?", ML.TESTED_INTERFACE, tostring(proj or "?"), projName))
 
     local LC = LibStub and LibStub("LibCompress", true)
     Add("Deflate compression", LC and LC.HasZlibCodecs and LC:HasZlibCodecs(),
         "C_EncodingUtil through LibCompress r87")               -- RETEST
     Add("Graph lines", UIParent and UIParent.CreateLine ~= nil, "Frame:CreateLine")   -- RETEST
-    Add("Item info", C_Item and C_Item.GetItemInfoInstant and C_Item.GetItemNameByID,
-        "C_Item.GetItemInfoInstant, C_Item.GetItemNameByID")   -- RETEST
-    Add("Item loading", C_Item and C_Item.RequestLoadItemDataByID and ns.eventOK.ITEM_DATA_LOAD_RESULT,
-        "C_Item.RequestLoadItemDataByID + ITEM_DATA_LOAD_RESULT")   -- RETEST
+    Add("Item data", C_Item and C_Item.GetItemInfoInstant and C_Item.GetItemNameByID and C_Item.RequestLoadItemDataByID and ns.eventOK.ITEM_DATA_LOAD_RESULT,
+        "C_Item.GetItemInfoInstant, GetItemNameByID, RequestLoadItemDataByID + ITEM_DATA_LOAD_RESULT")   -- RETEST
+    local invoices = type(rawget(_G, "GetInboxInvoiceInfo")) == "function"
+    Add("Mail invoices", invoices and ns.eventOK.MAIL_INBOX_UPDATE,
+        invoices and "GetInboxInvoiceInfo + MAIL_INBOX_UPDATE: sales and item purchases from mail"
+        or "GetInboxInvoiceInfo missing: sales read from mail subjects and gold only")   -- RETEST
+    local AH = rawget(_G, "C_AuctionHouse")
+    local buys = type(AH) == "table" and AH.ConfirmCommoditiesPurchase and ns.eventOK.COMMODITY_PURCHASE_SUCCEEDED
+    local postsOK = type(AH) == "table" and AH.PostItem and AH.CalculateItemDeposit
+    Add("Purchases and deposits", buys and postsOK, ("commodity purchases %s; deposits %s%s"):format(buys and "recorded" or "not available",
+        postsOK and "recorded" or "not available",
+        (postsOK and not ns.eventOK.AUCTION_HOUSE_AUCTION_CREATED) and " (at posting; AUCTION_HOUSE_AUCTION_CREATED missing)" or ""))   -- RETEST
     Add("Secret values", true, issecretvalue and "issecretvalue present: guards active" or "issecretvalue absent: guards idle")
     Add("Tooltip search", true, (C_TooltipInfo and C_TooltipInfo.GetItemByID) and "reads tooltips with C_TooltipInfo.GetItemByID"
         or "C_TooltipInfo missing: reads tooltips with a hidden tooltip")
@@ -513,6 +542,8 @@ end
 -------------------------------------------------------------------------------
 local HELP = {
     { "/mendel", "open / close the window" },
+    { "/mendel log", "open the Log tab (price history)" },
+    { "/mendel ledger", "open the Ledger tab (your auction house sales and purchases)" },
     { "/mendel <text>", "open the window and search (names, types, stats, effects, set bonuses or an item ID)" },
     { "/mendel record", "record Auctionator's prices now" },
     { "/mendel import", "record everything Auctionator has prices for" },
@@ -551,6 +582,8 @@ commands.repack = function() ns.Ledger:Repack(false) end
 commands.stats = function() ns.Ledger:PrintStats() end
 commands.probe = function() ML:PrintProbe() end
 commands.options = function() ML:Open("options") end
+commands.log = function() ML:Open("log") end
+commands.ledger = function() ML:Open("books") end
 commands.config = commands.options
 commands.forget = function() ML:ConfirmForget(ns.Ledger:ShownRealm()) end
 commands.reset = function()
@@ -620,7 +653,7 @@ commands.house = function(rest)
     local key = ns.Ledger:FindRealm(rest)
     if not key then ns.Print("nothing in the ledger matches \"" .. rest .. "\". Try /mendel houses.") return end
     ML:ShowRealm(key)
-    ML:Open("ledger")
+    ML:Open("log")
 end
 commands.realm = commands.house             -- older name
 
@@ -656,6 +689,7 @@ end
 
 ns.On("PLAYER_LOGIN", function()
     if ns.Ledger then Step("recording setup", function() ns.Ledger:OnLogin() end) end
+    if ns.Books then Step("Ledger tab setup", function() ns.Books:OnLogin() end) end
     if ML.InitUI then ML:InitUI(Step) end
     print(("|cffe6b422MendeLedger %s|r loaded  —  /mendel to browse Auctionator price history"):format(ML.VERSION))
     local iface = ns.Num((select(4, GetBuildInfo())))           -- RETEST
