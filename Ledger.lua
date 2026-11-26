@@ -329,7 +329,7 @@ function Ledger:DropLegacy(fromKey)
     self.index[fromKey] = nil
     if ML.db.settings.realm == fromKey then ML.db.settings.realm = nil end
     ns.Print(("removed the entry %s: everything in it is now in %s."):format(name, table.concat(into, " and ")))
-    ML:RequestUIRefresh()
+    ML:RequestUIRefresh(nil, true)
 end
 
 -- Scan detail: both scan logs are renumbered into one, in time order, and
@@ -384,7 +384,7 @@ function Ledger:StartScanMerge(fromKey, toKey)
                 self.newItems[k] = Codec.Merge(nil, C, C.l[C.n], compress, nil)
                 self.records = self.records + C.n
             end
-            if self.i % 8 == 0 and ns.Clock() >= deadline then return false end
+            if ns.Clock() >= deadline then return false end
         end
         return true
     end
@@ -409,7 +409,7 @@ function Ledger:StartScanMerge(fromKey, toKey)
             Ledger:DropLegacy(fromKey)
         end
         Ledger:NextScan()
-        ML:RequestUIRefresh()
+        ML:RequestUIRefresh(nil, true)
     end
     ns.StartJob(job)
 end
@@ -443,7 +443,7 @@ function Ledger:StartMerge(fromKey, toKey)
                     Ledger:IndexPut(toKey, k, new)
                 end
             end
-            if self.i % 8 == 0 and ns.Clock() >= deadline then return false end
+            if ns.Clock() >= deadline then return false end
         end
         return true
     end
@@ -457,7 +457,7 @@ function Ledger:StartMerge(fromKey, toKey)
             Ledger:RealmName(fromKey), Ledger:RealmName(toKey), ns.Commas(self.added)))
         Ledger:RefreshStats(toKey)
         Ledger:DropLegacy(fromKey)
-        ML:RequestUIRefresh()
+        ML:RequestUIRefresh(nil, true)
     end
     ns.StartJob(job)
 end
@@ -895,7 +895,7 @@ function Ledger:NextHarvest()
                     end
                 end
             end
-            if self.i % 16 == 0 and ns.Clock() >= deadline then return false end
+            if self.i % 4 == 0 and ns.Clock() >= deadline then return false end
         end
         return true
     end
@@ -930,10 +930,10 @@ function Ledger:HarvestDone(job)
         ns.Print(("%s: %s"):format(self:RealmName(job.key), self.status))
     end
     if s.keepDays > 0 then self:Prune(job.key) end
-    self:RefreshStats(job.key)
+    self:StatsChanged(job.key)
     if job.again then self:RecordNow(job.req.reason, true) end
     self:NextHarvest()
-    ML:RequestUIRefresh()
+    ML:RequestUIRefresh(nil, true)
 end
 
 -------------------------------------------------------------------------------
@@ -968,6 +968,36 @@ local function ItemJob(name, label, realmKey, perItem, onDone, store)
     return ns.StartJob(job)
 end
 
+-- Storage figures are only shown on the Options tab, and measuring them reads
+-- every item history (100,000+ strings on a busy account). So recordings and
+-- scans only mark them out of date; they're measured again when the Options
+-- tab shows them, or at most every 10 minutes.
+local STATS_EVERY = 600
+Ledger.statsAt = {}
+
+function Ledger:StatsChanged(realmKey, scans)
+    local realm = self:Realm(realmKey)
+    if not realm then return end
+    realm.statsDirty = true
+    if scans then realm.scanStatsDirty = true end
+    self:MaybeRefreshStats(realmKey)
+end
+
+function Ledger:MaybeRefreshStats(realmKey, now)
+    local realm = self:Realm(realmKey)
+    if not realm then return end
+    if not now and time() - (self.statsAt[realmKey] or 0) < STATS_EVERY then return end
+    self.statsAt[realmKey] = time()
+    if (realm.statsDirty or not realm.stats) and not ns.FindJob("stats") then
+        realm.statsDirty = nil
+        self:RefreshStats(realmKey)
+    end
+    if realm.scans and (realm.scanStatsDirty or not realm.scanStats) and not ns.FindJob("scanStats") then
+        realm.scanStatsDirty = nil
+        self:RefreshScanStats(realmKey)
+    end
+end
+
 function Ledger:RefreshStats(realmKey)
     local st = { items = 0, records = 0, bytes = 0, unpacked = 0, compressed = 0, rawSealed = 0 }
     ItemJob("stats", "measuring storage", realmKey, function(_, _, s)
@@ -984,7 +1014,7 @@ function Ledger:RefreshStats(realmKey)
     end, function()
         local realm = Ledger:Realm(realmKey)
         if realm then realm.stats = st end
-        ML:RequestUIRefresh()
+        ML:RequestUIRefresh(nil, true)
     end)
 end
 
@@ -1250,8 +1280,9 @@ function Ledger:FactsArrived(id, ok)
     local f = ReadFacts(id)
     if f then
         self.facts[id] = f
+        Ledger.factsVersion = (Ledger.factsVersion or 0) + 1
         local sort = ML.db.settings.sort
-        if sort == "profit" or sort == "deprofit" then ML:RequestUIRefresh(0.5) end
+        if sort == "profit" or sort == "deprofit" then ML:RequestUIRefresh(nil, true) end
     end
 end
 
@@ -1434,12 +1465,12 @@ function Ledger:TooltipArrived(id, ok)
         for _, idx in pairs(self.index) do
             if idx.byId[id] then idx.version = idx.version + 1 end
         end
-        if ML.searchActive then ML:RequestUIRefresh(0.5) end
+        if ML.searchActive then ML:RequestUIRefresh(nil, true) end
     end
 end
 
 -- Reads the tooltips of every item in a realm's index that doesn't have one yet
-function Ledger:EnsureTooltips(realmKey)
+function Ledger:EnsureTooltips(realmKey, foreground)
     if not ML.db.settings.searchTooltips or ns.FindJob("tooltips") then return end
     local idx = realmKey and self.index[realmKey]
     if not idx or not idx.ready then return end
@@ -1449,20 +1480,20 @@ function Ledger:EnsureTooltips(realmKey)
     end
     if #ids == 0 then return end
     table.sort(ids)
-    local job = { name = "tooltips", label = "reading item tooltips", ids = ids, i = 1 }
+    local job = { name = "tooltips", label = "reading item tooltips", ids = ids, i = 1, foreground = foreground }
     function job:Step(deadline)
         local list, n = self.ids, #self.ids
         while self.i <= n do
             Ledger:ReadTooltip(list[self.i])
             self.i = self.i + 1
-            if self.i % 8 == 0 and ns.Clock() >= deadline then return false end
+            if self.i % 2 == 0 and ns.Clock() >= deadline then return false end
         end
         return true
     end
     function job:Progress() return self.i - 1, #self.ids end
     function job:OnDone()
         idx.version = idx.version + 1
-        ML:RequestUIRefresh()
+        ML:RequestUIRefresh(nil, true)
     end
     ns.StartJob(job)
 end
@@ -1535,6 +1566,27 @@ function Ledger:FillNames(e)
     if label and e.kind == "suffix" and e.suffix then label = label .. " " .. e.suffix end
     e.label = label
     e.lname = label and label:lower() or nil
+    e.sn = e.lname or ("~" .. e.key)                 -- sort key: unnamed items last
+end
+
+-- Type, subtype, slot, icon and class of an item, asked once per item ID and
+-- session (the 42,000+ random-suffix keys of a busy account share 7,500 items)
+Ledger.instant = {}
+function Ledger:InstantInfo(id)
+    local info = self.instant[id]
+    if info then return info end
+    local getInstant = (C_Item and C_Item.GetItemInfoInstant) or rawget(_G, "GetItemInfoInstant")   -- RETEST
+    local _, itemType, itemSubType, equipLoc, icon, classID = ns.SafeCall(getInstant, id)
+    info = { typeName = Text(itemType), subName = Text(itemSubType), icon = Num(icon), cls = Num(classID) }
+    equipLoc = Text(equipLoc)
+    info.slotName = equipLoc and Text(rawget(_G, equipLoc)) or nil   -- "INVTYPE_LEGS" -> "Legs"
+    local words = {}
+    for _, w in ipairs({ info.typeName or "", info.subName or "", info.slotName or "" }) do
+        if w ~= "" then words[#words + 1] = w end
+    end
+    info.kinds = table.concat(words, "\n"):lower()
+    self.instant[id] = info
+    return info
 end
 
 function Ledger:MakeEntry(key, s, e)
@@ -1552,18 +1604,10 @@ function Ledger:MakeEntry(key, s, e)
                 e.icon = Num(icon)
             end
         elseif e.id then
-            local getInstant = (C_Item and C_Item.GetItemInfoInstant) or rawget(_G, "GetItemInfoInstant")   -- RETEST
-            local _, itemType, itemSubType, equipLoc, icon, classID = ns.SafeCall(getInstant, e.id)
-            e.typeName, e.subName, e.icon, e.cls = Text(itemType), Text(itemSubType), Num(icon), Num(classID)
-            equipLoc = Text(equipLoc)
-            e.slotName = equipLoc and Text(rawget(_G, equipLoc)) or nil   -- "INVTYPE_LEGS" -> "Legs"
+            local info = Ledger:InstantInfo(e.id)
+            e.typeName, e.subName, e.icon, e.cls, e.slotName, e.kinds = info.typeName, info.subName, info.icon, info.cls, info.slotName, info.kinds
         end
-        local words = {}
-        for _, w in ipairs({ e.typeName or "", e.subName or "", e.slotName or "" }) do
-            if w ~= "" then words[#words + 1] = w end
-        end
-        if e.kind == "pet" then words[#words + 1] = "Battle Pet" end
-        e.kinds = table.concat(words, "\n"):lower()
+        if e.kind == "pet" then e.kinds = "battle pets\nbattle pet" end
         self:FillNames(e)
     end
     e.m, e.ref7, e.count, e.first, e.last = m, ref7, count, first, last
@@ -1576,7 +1620,7 @@ function Ledger:GetIndex(realmKey)
     if not realmKey then return nil end
     local idx = self.index[realmKey]
     if idx then return idx end
-    idx = { byKey = {}, byId = {}, ready = false, version = 0 }
+    idx = { byKey = {}, byId = {}, ready = false, version = 0, count = 0, nameVersion = 0 }
     self.index[realmKey] = idx
     local realm = self:Realm(realmKey)
     if not realm then idx.ready = true return idx end
@@ -1586,7 +1630,7 @@ function Ledger:GetIndex(realmKey)
         idx.ready = true
         ML:RequestUIRefresh()
     end)
-    if not job then idx.ready = true end
+    if job then job.foreground = true else idx.ready = true end
     return idx
 end
 
@@ -1598,6 +1642,8 @@ function Ledger:IndexPut(realmKey, key, s)
     if not e then return end
     if not old then
         idx.byKey[key] = e
+        idx.count = (idx.count or 0) + 1
+        idx.nameVersion = (idx.nameVersion or 0) + 1  -- entries added: the name order changes
         if e.id and e.kind ~= "pet" then
             local list = idx.byId[e.id]
             if not list then list = {}; idx.byId[e.id] = list end
@@ -1612,6 +1658,8 @@ function Ledger:IndexRemove(realmKey, key)
     if not idx or not idx.byKey[key] then return end
     local e = idx.byKey[key]
     idx.byKey[key] = nil
+    idx.count = math.max(0, (idx.count or 1) - 1)
+    idx.nameVersion = (idx.nameVersion or 0) + 1
     local list = e.id and idx.byId[e.id]
     if list then
         for i = #list, 1, -1 do if list[i] == e then table.remove(list, i) end end
@@ -1625,9 +1673,10 @@ function Ledger:NameArrived(itemID)
         if list then
             for _, e in ipairs(list) do self:FillNames(e) end
             idx.version = idx.version + 1
+            idx.nameVersion = (idx.nameVersion or 0) + 1
         end
     end
-    ML:RequestUIRefresh(0.5)
+    ML:RequestUIRefresh(nil, true)
 end
 
 -- Every record of one item (decoded once and kept while it doesn't change)
@@ -1742,7 +1791,7 @@ function Ledger:NextScan()
                     Ledger:IndexPut(self.key, k, newDaily)
                 end
             end
-            if self.i % 16 == 0 and ns.Clock() >= deadline then return false end
+            if ns.Clock() >= deadline then return false end
         end
         return true
     end
@@ -1765,10 +1814,9 @@ function Ledger:ScanDone(job)
     local realm = self:Realm(job.key)
     if realm and not job.failed and job.saved > 0 then realm.lastRecord = time() end
     self:PruneScans(job.key)
-    self:RefreshScanStats(job.key)
-    self:RefreshStats(job.key)
+    self:StatsChanged(job.key, true)
     self:NextScan()
-    ML:RequestUIRefresh(0.5)
+    ML:RequestUIRefresh(nil, true)
 end
 
 -- Scan detail older than keepScanDays goes, a sealed block (128 scans of an item) at a time
@@ -1816,7 +1864,7 @@ function Ledger:RefreshScanStats(realmKey)
         st.compressed = st.compressed + comp
     end, function()
         realm.scanStats = st
-        ML:RequestUIRefresh()
+        ML:RequestUIRefresh(nil, true)
     end, "scans")
 end
 
@@ -1867,6 +1915,7 @@ function Ledger:OnLogin()
     for key, realm in pairs(ML.db.realms) do
         if not realm.stats then self:RefreshStats(key) end
         if realm.scans and not realm.scanStats then self:RefreshScanStats(key) end
+        self.statsAt[key] = time()                    -- next routine measurement in 10 minutes
     end
     self:HookScans()
     self:ScheduleRecord(10, "login", true)

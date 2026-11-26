@@ -26,7 +26,7 @@ local ML = {}
 ns.ML = ML
 _G.MendeLedger = ML
 
-ML.VERSION          = "0.3.0"
+ML.VERSION          = "0.3.1"
 ML.TESTED_INTERFACE = 16001                                   -- RETEST: the build this was written against
 ML.PREFIX           = "|cffe6b422MendeLedger:|r "
 
@@ -389,13 +389,19 @@ local function FlushCombatQueue()
 end
 
 -------------------------------------------------------------------------------
--- Background jobs: recording, indexing, repacking and pruning run a few
--- milliseconds per frame (C_Timer, not OnUpdate) and pause during combat.
+-- Background jobs: recording, indexing, repacking and pruning run in small
+-- slices (C_Timer, not OnUpdate) and pause during combat. Each slice is a share
+-- of the time since the previous frame, so the work never takes more than about
+-- a tenth of the frame (a quarter for work the player is waiting on, such as
+-- filling the list), whatever the frame rate. A job with foreground = true gets
+-- the larger share.
 -- A job is { name = "...", Step = function(job, deadline) return done end,
 --            OnDone = function(job) end, Progress = function(job) return done, total end }
 -------------------------------------------------------------------------------
 local jobs, pumping = {}, false
-local BUDGET_MS = 5
+local SHARE_BACKGROUND, SHARE_FOREGROUND = 0.10, 0.25
+local MIN_MS, MAX_MS = 0.5, 4
+local lastPumpAt
 local clock = debugprofilestop                                -- RETEST
     or function() return (GetTimePreciseSec and GetTimePreciseSec() or GetTime()) * 1000 end
 ns.Clock = clock
@@ -409,12 +415,17 @@ end
 
 Pump = function()
     pumping = false
-    if #jobs == 0 then return end
+    if #jobs == 0 then lastPumpAt = nil return end
     if InCombatLockdown() then
+        lastPumpAt = nil
         ns.AfterCombat("jobs", Schedule)
         return
     end
-    local deadline = clock() + BUDGET_MS
+    local now = GetTime()                                         -- the time this frame started
+    local frameMs = lastPumpAt and (now - lastPumpAt) * 1000 or 16
+    lastPumpAt = now
+    local share = jobs[1].foreground and SHARE_FOREGROUND or SHARE_BACKGROUND
+    local deadline = clock() + math.max(MIN_MS, math.min(MAX_MS, frameMs * share))
     repeat
         local job = jobs[1]
         local ok, done = pcall(job.Step, job, deadline)

@@ -164,25 +164,42 @@ local function IsTail(item, i)
     return i == #item.segs and item.segs[i].count < Codec.SEAL
 end
 
--- Cheap header summary for the item list and storage statistics.
+-- Cheap header summary for the item list and storage statistics. It walks the
+-- header and segment headers in place, without building tables, because the
+-- index and the storage figures call it once for every item (50,000+ on a
+-- busy account).
 -- m, ref7, records, firstDay, lastDay, segments, compressedBlocks, rawSealedBlocks, unpackedBytes
 function Codec.Summary(s)
-    local item = Codec.Parse(s)
-    if not item then return nil end
-    local segs = item.segs
-    local count, comp, rawSealed, unpacked = 0, 0, 0, #s
-    for i, seg in ipairs(segs) do
-        count = count + seg.count
-        if seg.kind == 1 then
+    if type(s) ~= "string" or sub(s, 1, 1) ~= FORMAT_BYTE then return nil end
+    local pos = 2
+    local m, ref7, nSeg
+    m, pos = ReadVarint(s, pos);    if not m then return nil end
+    ref7, pos = ReadVarint(s, pos); if not ref7 then return nil end
+    nSeg, pos = ReadVarint(s, pos); if not nSeg then return nil end
+    local total, size = 0, #s
+    local count, comp, rawSealed, unpacked = 0, 0, 0, size
+    local firstDay, lastDay
+    for i = 1, nSeg do
+        local kind, n, first, span, rawLen, len
+        kind, pos = ReadVarint(s, pos);  if not kind then return nil end
+        n, pos = ReadVarint(s, pos);     if not n then return nil end
+        first, pos = ReadVarint(s, pos); if not first then return nil end
+        span, pos = ReadVarint(s, pos);  if not span then return nil end
+        if kind == 1 then rawLen, pos = ReadVarint(s, pos); if not rawLen then return nil end end
+        len, pos = ReadVarint(s, pos);   if not len then return nil end
+        if pos + len - 1 > size then return nil end
+        pos = pos + len
+        count = count + n
+        if i == 1 then firstDay = first end
+        lastDay = first + span
+        if kind == 1 then
             comp = comp + 1
-            unpacked = unpacked - seg.bodyLen + (seg.rawLen or seg.bodyLen)
-        elseif not IsTail(item, i) then
+            unpacked = unpacked - len + (rawLen or len)
+        elseif not (i == nSeg and n < Codec.SEAL) then
             rawSealed = rawSealed + 1
         end
     end
-    local first = segs[1] and segs[1].first or nil
-    local last  = segs[#segs] and segs[#segs].last or nil
-    return item.m, item.ref7, count, first, last, #segs, comp, rawSealed, unpacked
+    return m, ref7, count, firstDay, lastDay, nSeg, comp, rawSealed, unpacked
 end
 
 -------------------------------------------------------------------------------

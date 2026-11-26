@@ -90,7 +90,7 @@ The search box looks at each item's name, its type and slot, and everything in i
 
 Some searches to try: `sword`, `plate legs`, `binds when equipped`, `critical strike`, `"chance on hit"`, `strongholds`.
 
-Tooltips are read in the background after you open the window, which takes a few seconds the first time in each session. To search names and item types only, turn off **Search item tooltips** in the **Filter** menu.
+Tooltips are read in the background the first time you search in each session, which takes a few seconds; names and item types match straight away, and the results fill in as tooltips are read. To search names and item types only, turn off **Search item tooltips** in the **Filter** menu.
 
 ## Vendor profit
 
@@ -124,7 +124,7 @@ Click the gear tab on the right edge of the window.
 - **Compression**: saves disk space. It's best to leave it on.
 - **Keep Daily History**: Forever, 2 years, 1 year, 180 days or 90 days.
 - **Display**: show the minimap button; print a line in chat after each recording.
-- **Storage**: how much space your history uses.
+- **Storage**: how much space your history uses. The figures are measured when you open this tab, so they can take a few seconds to update.
 - **Auction Houses**: each one MendeLedger has prices for, shown as region / ruleset / faction. Click one to view its prices; **Forget** deletes its history (Auctionator's own data is not touched). **Use Here** is only needed if MendeLedger can't tell which auction house your character uses. An entry marked "from before 0.2.7" holds older prices that haven't found their auction house yet (see Troubleshooting).
 - **Client**: shows which game features MendeLedger found. Useful when reporting a problem.
 
@@ -164,7 +164,9 @@ Scan detail takes more. Scanning every 30 minutes all day can add about half a m
 
 **Items show as "Item #12345".** Item names are loaded from the server and appear after a short while.
 
-**A search misses items right after opening the window.** Tooltips are still being read; the line under the title shows the progress, and the results fill in as it finishes.
+**A search misses items the first time.** Tooltips are still being read; the line under the title shows the progress, and the results fill in as it finishes.
+
+**The list takes a few seconds to appear.** The first time you open the window in a session, MendeLedger reads through your whole history to build the item list ("Reading the ledger... 45%"). It does this in small slices so the game stays smooth, which on a large history takes a few seconds. Opening it again in the same session is instant.
 
 **"No scans of this item in this range."** Scan detail only exists for scans made while MendeLedger was enabled. The daily view is shown instead.
 

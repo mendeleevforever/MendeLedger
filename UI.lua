@@ -529,14 +529,26 @@ function ML:ShowRealm(key)
     self:RequestUIRefresh(0)
 end
 
-local refreshTimer
-function ML:RequestUIRefresh(delay)
+-- Refreshing rebuilds the list, so requests coming from background work
+-- (recordings, scans, items loading) are spaced at least BACKGROUND_GAP
+-- seconds apart; the player's own actions still refresh right away.
+local refreshTimer, refreshAt, lastRefresh = nil, 0, 0
+local BACKGROUND_GAP = 5
+function ML:RequestUIRefresh(delay, background, gap)
     local f = self.frame
     if not f or not f:IsShown() then return end
-    if refreshTimer then return end
-    refreshTimer = C_Timer.NewTimer(delay or 0.15, function()
+    local now = GetTime()
+    local at = now + (delay or 0.15)
+    if background then at = math.max(at, lastRefresh + (gap or BACKGROUND_GAP)) end
+    if refreshTimer then
+        if at >= refreshAt then return end            -- an earlier refresh is already planned
+        refreshTimer:Cancel()
+    end
+    refreshAt = at
+    refreshTimer = C_Timer.NewTimer(math.max(0, at - now), function()
         refreshTimer = nil
         if not f:IsShown() then return end
+        lastRefresh = GetTime()
         if self.currentTab == "options" then self:RefreshOptions() else self:RefreshLedger() end
         self:UpdateInfoLine()
     end)
@@ -550,8 +562,16 @@ function ML:OnJobProgress()
     self:UpdateInfoLine()
     if self.currentTab == "options" then self:UpdateRecordingStatus() end
     local job = ns.CurrentJob()
-    if job and self.currentTab == "ledger" and (job.name == "index" or (job.name == "tooltips" and self.searchActive)) then
-        self:RefreshLedger()
+    if job and self.currentTab == "ledger" then
+        if job.name == "index" then
+            -- no list rebuilds while the index fills: just show how far it is
+            local done, total = job:Progress()
+            local lv = f.ledgerView
+            lv.listEmpty:SetText(("Reading the ledger... %d%%"):format(total > 0 and math.floor(done / total * 100) or 0))
+            lv.listEmpty:Show()
+        elseif job.name == "tooltips" and self.searchActive then
+            self:RequestUIRefresh(nil, true, 2)           -- search results fill in as tooltips are read
+        end
     end
 end
 
@@ -571,7 +591,9 @@ function ML:UpdateInfoLine()
         return
     end
     local st = realm.stats or {}
-    local parts = { Ledger:RealmName(key) .. "  —  " .. ns.Commas(st.items or 0) .. " items" }
+    local idx = Ledger.index[key]
+    local items = (idx and idx.ready and idx.count) or st.items or 0
+    local parts = { Ledger:RealmName(key) .. "  —  " .. ns.Commas(items) .. " items" }
     if st.first then parts[#parts + 1] = ns.DayLabel(st.first) .. " – " .. ns.DayDate(st.last) end
     parts[#parts + 1] = "recorded " .. ns.Ago(realm.lastRecord)
     f.info:SetText(table.concat(parts, "  •  "))
@@ -956,6 +978,31 @@ local SORTS = {
     end,
 }
 
+-- Every entry in the current sort order. Sorting tens of thousands of entries
+-- is the expensive part of building the list, so the order is kept and only
+-- redone when the index, the sort or (for the profit sorts) item facts change;
+-- typing a search or changing a filter only filters.
+function ML:SortedEntries(realmKey, idx)
+    local sort = self.db.settings.sort
+    local facts = (sort == "profit" or sort == "deprofit") and (Ledger.factsVersion or 0) or 0
+    -- by name, only added, removed or renamed entries change the order; prices don't
+    local version = (sort == "name") and (idx.nameVersion or 0) or idx.version
+    local c = self.sortCache
+    if c and c.idx == idx and c.version == version and c.sort == sort and c.facts == facts then return c.list end
+    local list, priceMemo = {}, {}
+    for _, e in pairs(idx.byKey) do
+        if sort == "profit" then
+            e.profit, e.vendorPrice = Ledger:VendorProfit(e)
+        elseif sort == "deprofit" then
+            e.deProfit, e.deValue, e.deState, e.dePartial = Ledger:DisenchantProfit(realmKey, e, priceMemo)
+        end
+        list[#list + 1] = e
+    end
+    table.sort(list, SORTS[sort] or SORTS.name)
+    self.sortCache = { idx = idx, version = version, sort = sort, facts = facts, list = list }
+    return list
+end
+
 function ML:BuildEntries(realmKey, searchText)
     local idx = Ledger:GetIndex(realmKey)
     if not idx then return {}, 0 end
@@ -967,34 +1014,27 @@ function ML:BuildEntries(realmKey, searchText)
     -- searches keep their own open/closed state: every search starts with all
     -- item types open, and closing one doesn't change the saved layout
     if not searching then wipe(self.searchCollapsed) end
+    if not idx.ready then return {}, idx.count or 0, false end    -- shown once the index is complete
     local recentFrom = ns.Today() - 7
-    local priceMemo = {}
-    local groups, total = {}, 0
-    for _, e in pairs(idx.byKey) do
-        total = total + 1
+    local sorted = self:SortedEntries(realmKey, idx)
+    local groups, names = {}, {}
+    for i = 1, #sorted do
+        local e = sorted[i]
         local pass = true
         if s.recentOnly and (not e.last or e.last < recentFrom) then pass = false end
         if s.multiDay and (e.count or 0) < 2 then pass = false end
         if pass and searching then pass = Ledger:Matches(e, terms, useTips) end
         if pass then
-            if s.sort == "profit" then e.profit, e.vendorPrice = Ledger:VendorProfit(e) end
-            if s.sort == "deprofit" then
-                e.deProfit, e.deValue, e.deState, e.dePartial = Ledger:DisenchantProfit(realmKey, e, priceMemo)
-            end
-            e.sn = e.lname or ("~" .. e.key)
             local gname = s.groupByType and (e.typeName or OTHER) or ""
             local g = groups[gname]
-            if not g then g = {}; groups[gname] = g end
-            g[#g + 1] = e
+            if not g then g = {}; groups[gname] = g; names[#names + 1] = gname end
+            g[#g + 1] = e                             -- already in sort order
         end
     end
-    local names = {}
-    for gname in pairs(groups) do names[#names + 1] = gname end
     table.sort(names, function(a, b)
         if (a == OTHER) ~= (b == OTHER) then return b == OTHER end
         return a < b
     end)
-    local cmp = SORTS[s.sort] or SORTS.name
     local entries = {}
     for _, gname in ipairs(names) do
         local list = groups[gname]
@@ -1003,11 +1043,10 @@ function ML:BuildEntries(realmKey, searchText)
             entries[#entries + 1] = { header = true, name = gname, n = #list, collapsed = collapsed }
         end
         if not collapsed then
-            table.sort(list, cmp)
             for _, e in ipairs(list) do entries[#entries + 1] = e end
         end
     end
-    return entries, total, idx.ready
+    return entries, idx.count or 0, true
 end
 
 ML.searchCollapsed = {}
@@ -1049,7 +1088,11 @@ function ML:RefreshLedger(resetScroll)
     end
     local search = f.search:GetText() or ""
     local entries, total, ready = self:BuildEntries(realmKey, search)
-    if ready then Ledger:EnsureTooltips(realmKey) end
+    if ready and self.db.settings.searchTooltips and self.searchActive then
+        Ledger:EnsureTooltips(realmKey, true)         -- the player is waiting on these
+    elseif ready and self.db.settings.sort == "deprofit" then
+        Ledger:EnsureTooltips(realmKey, false)        -- "Cannot be disenchanted" lines, in the background
+    end
     lv.itemList:SetData(entries, resetScroll or search ~= self.lastSearch)
     self.lastSearch = search
 
@@ -2092,6 +2135,8 @@ function ML:RefreshOptions()
     local f = self.frame
     if not f or not f.optionsView:IsShown() then return end
     local ov, s = f.optionsView, self.db.settings
+    local shown = Ledger:ShownRealm()
+    if shown then Ledger:MaybeRefreshStats(shown, true) end
 
     ov.intro:SetText(("Auctionator keeps its last %d days of prices. MendeLedger copies each day into its own ledger, which keeps growing."):format(Ledger:AuctionatorDays()))
     ov.autoCheck:SetChecked(s.autoRecord)
